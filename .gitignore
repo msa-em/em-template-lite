@@ -1,0 +1,20 @@
+_build
+_output
+.ipynb_checkpoints/
+
+# JupyterLite build artifacts
+.jupyterlite.doit.db
+.cache/
+
+# Generated data (pre-decoded in CI)
+notebooks/data/*_frames.npz
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.uv/
+
+# OS
+.DS_Store
+~*.docx

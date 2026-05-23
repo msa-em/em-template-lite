@@ -1,0 +1,13 @@
+# Packages preloaded into the Pyodide kernel when a reader launches an interactive cell.
+# These are installed in-browser via piplite/micropip at kernel boot.
+# Anything not listed here can still be installed at runtime with:
+#     %pip install <pkg>
+#
+# Notes:
+#   - numpy, scipy, matplotlib, h5py, ipywidgets, imageio are already shipped with Pyodide
+#     so they don't need to be listed.
+#   - pyav is NOT available in Pyodide. Movies are pre-decoded to .npz in CI; see scripts/prep_data.py.
+#   - k3d compatibility in Pyodide is unverified; volume rendering may need a JS rewrite.
+
+ipympl
+k3d

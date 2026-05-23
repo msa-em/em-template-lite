@@ -1,0 +1,22 @@
+name: em-template-lite
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy
+  - scipy
+  - h5py
+  - matplotlib
+  - k3d
+  - imageio
+  - imageio-ffmpeg
+  - ipywidgets
+  - ipympl
+  - jupyterlab
+  - jupyterlab-myst
+  - 'nodejs>=20,<21'
+  - mystmd
+  - pip
+  - pip:
+    - jupyterlite-core
+    - jupyterlite-pyodide-kernel
