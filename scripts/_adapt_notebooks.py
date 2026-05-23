@@ -1,11 +1,17 @@
-"""One-shot script (idempotent) that rewrites notebooks/02 and notebooks/03 to
-load video frames from a pre-decoded .npz instead of decoding .mp4 via pyav.
+"""One-shot script (idempotent) that adapts notebooks for JupyterLite.
 
-Pyodide doesn't ship pyav, so the original mp4-reading code can't run inside
-JupyterLite. `scripts/prep_data.py` produces `45grains_frames.npz`; this script
-rewrites the two affected notebooks to consume that npz.
+Two adjustments:
 
-Idempotent: if the rewrite has already been applied, this is a no-op.
+1. **mp4 -> npz.** Pyodide doesn't ship pyav, so notebooks 02 and 03 can't
+   decode the .mp4 directly. We rewrite the data-loading block to read from
+   `data/45grains_frames.npz` instead (produced by `scripts/prep_data.py`).
+
+2. **piplite install.** Pyodide ships numpy/matplotlib/ipywidgets but NOT
+   ipympl (required by `%matplotlib widget`) or k3d (volume rendering).
+   We prepend a `%pip install` line to each labeled cell so piplite pulls
+   them in at kernel boot.
+
+Idempotent: if a notebook has already been patched, this is a no-op.
 
 Run once after copying notebooks from upstream em-template:
 
@@ -142,7 +148,54 @@ def main() -> int:
 
     patch_notebook(NB02, replacements_02, marker="iio.improps")
     patch_notebook(NB03, replacements_03, marker="iio.improps")
+
+    # Prepend %pip install to every notebook's labeled cell so piplite
+    # pulls in Pyodide-missing packages (ipympl, k3d) at kernel boot.
+    pip_installs = {
+        "01.interactive_image.ipynb":           ["%pip install -q ipympl\n"],
+        "02.animation_movie.ipynb":             ["%pip install -q ipympl\n"],
+        "03.interactive_movie.ipynb":           ["%pip install -q ipympl\n"],
+        "04.interactive_volume_slicing.ipynb":  ["%pip install -q ipympl\n"],
+        "05.interactive_volume_rendering.ipynb": ["%pip install -q ipympl k3d\n"],
+        "06.custom_FT_1D.ipynb":                ["%pip install -q ipympl\n"],
+    }
+    for filename, lines in pip_installs.items():
+        prepend_pip_install(ROOT / filename, lines)
+
     return 0
+
+
+def prepend_pip_install(path: Path, install_lines: list[str]) -> None:
+    """Insert %pip install at the top of the first code cell of `path`.
+
+    Idempotent: if any "pip install" line already exists in the first code
+    cell, this is a no-op.
+    """
+    if not path.exists():
+        print(f"[skip] {path.name} not found", file=sys.stderr)
+        return
+    nb = json.loads(path.read_text())
+    for cell in nb["cells"]:
+        if cell["cell_type"] != "code":
+            continue
+        src = cell.get("source", "")
+        lines = src if isinstance(src, list) else src.splitlines(keepends=True)
+        if any("pip install" in ln for ln in lines):
+            print(f"[skip] {path.name} already has %pip install")
+            return
+        # Insert after any leading comment/blank lines so `#| label:` stays at top.
+        insert_at = 0
+        for i, line in enumerate(lines):
+            if line.startswith("#") or line.strip() == "":
+                insert_at = i + 1
+            else:
+                break
+        new_lines = lines[:insert_at] + install_lines + ["\n"] + lines[insert_at:]
+        cell["source"] = new_lines
+        path.write_text(json.dumps(nb, indent=1) + "\n")
+        print(f"[patched] {path.name} (+%pip install)")
+        return
+    print(f"[skip] {path.name} has no code cells", file=sys.stderr)
 
 
 if __name__ == "__main__":
