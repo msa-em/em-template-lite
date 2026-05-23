@@ -49,6 +49,9 @@ jobs:
       - name: Pre-decode mp4 -> npz (Pyodide lacks pyav)
         run: python scripts/prep_data.py
 
+      - name: Quantize image data for anywidget viewer
+        run: python scripts/prep_widget_data.py
+
       - name: Build JupyterLite
         run: |
           jupyter lite build \
@@ -62,14 +65,23 @@ jobs:
           BASE_URL: /em-template-lite
         run: myst build --html
 
-      - name: Combine MyST + JupyterLite outputs
+      - name: Combine MyST + JupyterLite + anywidget data
         run: |
           # MyST writes the static site to _build/html. Merge it into _output/site,
           # which already contains _output/site/lite/ from the JupyterLite step.
           mkdir -p _output/site
           cp -r _build/html/. _output/site/
+
+          # MyST auto-hashes and copies the anywidget JS itself, but the data
+          # files referenced by the widget's `model` body are opaque strings to
+          # MyST. Stage them under the same `widgets/data/` path the model points at.
+          mkdir -p _output/site/widgets/data
+          cp -r widgets/data/. _output/site/widgets/data/
+
           echo "Site contents:"
           ls -la _output/site/
+          echo "Widget data:"
+          ls -la _output/site/widgets/data/
           echo "JupyterLite contents:"
           ls -la _output/site/lite/ | head -10
 

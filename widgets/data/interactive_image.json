@@ -1,0 +1,27 @@
+{
+  "shape": [
+    2,
+    1400,
+    1400
+  ],
+  "dtype_stored": "uint16",
+  "dtype_logical": "float32",
+  "pixel_size_nm": 0.015384615384615385,
+  "scalebar_length_nm": 2.0,
+  "frames": [
+    {
+      "label": "exit wave phase",
+      "vmin": -0.08982612192630768,
+      "vmax": 0.07440340518951416,
+      "mean": -0.00013153249165043235,
+      "std": 0.014779696241021156
+    },
+    {
+      "label": "exit wave amplitude",
+      "vmin": 0.9391211867332458,
+      "vmax": 1.0701316595077515,
+      "mean": 0.9997148513793945,
+      "std": 0.016988199204206467
+    }
+  ]
+}

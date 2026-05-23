@@ -33,6 +33,7 @@ project:
     - 'environment.yml'
   resources:
     - 'notebooks/**/*'
+    - 'widgets/**/*'
   references:
     mystmd: https://mystmd.org/guide
   exclude:

@@ -8,6 +8,7 @@ _output
 
 # Generated data (pre-decoded in CI)
 notebooks/data/*_frames.npz
+widgets/data/*.bin
 
 # Python
 __pycache__/

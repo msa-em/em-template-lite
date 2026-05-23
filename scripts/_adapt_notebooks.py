@@ -149,27 +149,39 @@ def main() -> int:
     patch_notebook(NB02, replacements_02, marker="iio.improps")
     patch_notebook(NB03, replacements_03, marker="iio.improps")
 
-    # Prepend %pip install to every notebook's labeled cell so piplite
-    # pulls in Pyodide-missing packages (ipympl, k3d) at kernel boot.
-    pip_installs = {
-        "01.interactive_image.ipynb":           ["%pip install -q ipympl\n"],
-        "02.animation_movie.ipynb":             ["%pip install -q ipympl\n"],
-        "03.interactive_movie.ipynb":           ["%pip install -q ipympl\n"],
-        "04.interactive_volume_slicing.ipynb":  ["%pip install -q ipympl\n"],
+    # Prepend a JupyterLite bootstrap block to every notebook's first code cell:
+    #   1. `%pip install` for Pyodide-missing packages (ipympl, k3d)
+    #   2. chdir into `/drive` (where JupyterLite mounts contents) so relative
+    #      data paths like `data/foo.npz` resolve. No-op in standard Jupyter.
+    bootstraps = {
+        "01.interactive_image.ipynb":            ["%pip install -q ipympl\n"],
+        "02.animation_movie.ipynb":              ["%pip install -q ipympl\n"],
+        "03.interactive_movie.ipynb":            ["%pip install -q ipympl\n"],
+        "04.interactive_volume_slicing.ipynb":   ["%pip install -q ipympl\n"],
         "05.interactive_volume_rendering.ipynb": ["%pip install -q ipympl k3d\n"],
-        "06.custom_FT_1D.ipynb":                ["%pip install -q ipympl\n"],
+        "06.custom_FT_1D.ipynb":                 ["%pip install -q ipympl\n"],
     }
-    for filename, lines in pip_installs.items():
-        prepend_pip_install(ROOT / filename, lines)
+    chdir_lines = [
+        "import os\n",
+        "if os.path.isdir('/drive'):  # JupyterLite: contents mount, kernel CWD is /home/pyodide\n",
+        "    os.chdir('/drive')\n",
+    ]
+    for filename, pip_lines in bootstraps.items():
+        prepend_bootstrap(ROOT / filename, pip_lines + ["\n"] + chdir_lines)
 
     return 0
 
 
-def prepend_pip_install(path: Path, install_lines: list[str]) -> None:
-    """Insert %pip install at the top of the first code cell of `path`.
+def prepend_bootstrap(path: Path, bootstrap_lines: list[str]) -> None:
+    """Insert a bootstrap block (pip install + chdir) at the top of the first
+    code cell of `path`.
 
-    Idempotent: if any "pip install" line already exists in the first code
-    cell, this is a no-op.
+    Idempotent across the two markers we use:
+      - "pip install" implies the install line is already there
+      - "/drive"      implies the chdir line is already there
+
+    If either is found, the existing block is replaced wholesale so we can
+    safely re-run after the bootstrap content changes.
     """
     if not path.exists():
         print(f"[skip] {path.name} not found", file=sys.stderr)
@@ -180,9 +192,19 @@ def prepend_pip_install(path: Path, install_lines: list[str]) -> None:
             continue
         src = cell.get("source", "")
         lines = src if isinstance(src, list) else src.splitlines(keepends=True)
-        if any("pip install" in ln for ln in lines):
-            print(f"[skip] {path.name} already has %pip install")
-            return
+
+        # Strip any prior bootstrap block: contiguous lines mentioning
+        # `pip install` or `/drive`, plus any blank line immediately after.
+        marker = lambda ln: "pip install" in ln or "/drive" in ln or "os.chdir" in ln
+        if any(marker(ln) for ln in lines):
+            # Remove the first contiguous run of marker+context.
+            start = next(i for i, ln in enumerate(lines) if marker(ln))
+            end = start
+            while end < len(lines) and (marker(lines[end]) or lines[end].strip() == "" or lines[end].startswith("import os")):
+                end += 1
+            lines = lines[:start] + lines[end:]
+            print(f"[strip] {path.name} (removed prior bootstrap)")
+
         # Insert after any leading comment/blank lines so `#| label:` stays at top.
         insert_at = 0
         for i, line in enumerate(lines):
@@ -190,10 +212,10 @@ def prepend_pip_install(path: Path, install_lines: list[str]) -> None:
                 insert_at = i + 1
             else:
                 break
-        new_lines = lines[:insert_at] + install_lines + ["\n"] + lines[insert_at:]
+        new_lines = lines[:insert_at] + bootstrap_lines + ["\n"] + lines[insert_at:]
         cell["source"] = new_lines
         path.write_text(json.dumps(nb, indent=1) + "\n")
-        print(f"[patched] {path.name} (+%pip install)")
+        print(f"[patched] {path.name} (+bootstrap)")
         return
     print(f"[skip] {path.name} has no code cells", file=sys.stderr)
 

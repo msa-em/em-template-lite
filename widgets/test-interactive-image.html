@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Interactive Image Widget Test</title>
+  <style>
+    body { margin: 0; padding: 20px; background: #fafafa; font-family: system-ui, sans-serif; }
+    h1 { font-size: 18px; }
+    .frame { background: #fff; padding: 16px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); max-width: 760px; }
+  </style>
+</head>
+<body>
+  <h1>interactive-image.js — standalone test</h1>
+  <div class="frame">
+    <div id="root"></div>
+  </div>
+  <script type="module">
+    import widget from "./interactive-image.js";
+    // Same model.get(...) shape MyST/Curvenote provides.
+    const model = {
+      get: (k) => ({
+        data_url: "./data/interactive_image.bin",
+        meta_url: "./data/interactive_image.json",
+      })[k],
+    };
+    widget.render({ model, el: document.getElementById("root") });
+  </script>
+</body>
+</html>

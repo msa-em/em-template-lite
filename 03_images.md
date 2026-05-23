@@ -68,3 +68,22 @@ You can zoom in, pan around, change the contrast range, and even change the colo
 Additionally we can use a dropdown menu to select either the EWR phase or amplitude. 
 We reference [](#fig_EWR_graphene_interactive) in the same manner as before.
 
+## Kernel-less alternative: `anywidget`
+
+The figure above runs a Python kernel in the reader's browser via [JupyterLite](https://jupyterlite.readthedocs.io).
+That brings the full scientific Python stack to the page, but at a cost: a 5–15 second kernel boot and a multi-megabyte Pyodide download on first interaction.
+
+For widgets where pure JavaScript is sufficient, [anywidget](https://anywidget.dev)-style components offer an alternative — no Python in the browser, the interactive loads instantly, and the underlying data can still be the same `.npz` (or in our case, a uint16-quantized version of it built once at deploy time).
+
+The figure below is the same exit-wave-reconstruction viewer, implemented as a kernel-less anywidget:
+
+:::{anywidget} ./widgets/interactive-image.js
+{
+  "data_url": "./widgets/data/interactive_image.bin",
+  "meta_url": "./widgets/data/interactive_image.json"
+}
+:::
+
+Both versions read the same underlying graphene HRTEM reconstruction, and offer the same controls (frame, colormap, histogram-based contrast, scale bar).
+The choice between them is editorial: kernel-backed widgets are open-ended (a reader can edit the code inline and re-run), while anywidget components are fast and self-contained.
+
