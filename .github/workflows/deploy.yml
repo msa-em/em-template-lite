@@ -36,9 +36,12 @@ jobs:
           python -m pip install --upgrade pip
           # `av` (pyav) is needed only for the one-time mp4 -> npz decode in prep_data.py.
           # jupyterlite-* build the in-browser kernel bundle.
+          # jupyter-server is required by jupyterlite's `contents` addon to
+          # index custom notebooks into the bundle.
           python -m pip install \
             "numpy" "imageio" "av" \
-            "jupyterlite-core" "jupyterlite-pyodide-kernel"
+            "jupyterlite-core" "jupyterlite-pyodide-kernel" \
+            "jupyter-server"
 
       - name: Install MyST CLI
         run: npm install -g mystmd
