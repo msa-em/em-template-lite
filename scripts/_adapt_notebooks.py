@@ -29,6 +29,12 @@ ROOT = Path(__file__).resolve().parent.parent / "notebooks"
 NB02 = ROOT / "02.animation_movie.ipynb"
 NB03 = ROOT / "03.interactive_movie.ipynb"
 
+# Explicit markers bracketing the auto-generated bootstrap block so the strip
+# step in prepend_bootstrap() can replace the block wholesale without false
+# matches on innocent code that happens to mention `os` or `pip`.
+BOOTSTRAP_START_MARKER = "# --- jupyterlite bootstrap (auto-generated; do not edit) ---\n"
+BOOTSTRAP_END_MARKER = "# --- end jupyterlite bootstrap ---\n"
+
 OLD_IMPORT = "import imageio.v3 as iio\n"
 NEW_IMPORT = (
     "# Frames are pre-decoded by scripts/prep_data.py.\n"
@@ -161,27 +167,115 @@ def main() -> int:
         "05.interactive_volume_rendering.ipynb": ["%pip install -q ipympl k3d\n"],
         "06.custom_FT_1D.ipynb":                 ["%pip install -q ipympl\n"],
     }
-    chdir_lines = [
-        "import os\n",
-        "if os.path.isdir('/drive'):  # JupyterLite: contents mount, kernel CWD is /home/pyodide\n",
-        "    os.chdir('/drive')\n",
+    # JupyterLite on GitHub Pages can't mount the contents filesystem (no
+    # SharedArrayBuffer headers, no working Service Worker). So `data/foo.npz`
+    # paths don't resolve. We install a small async helper that:
+    #   - tries the local filesystem first (works in standard Jupyter)
+    #   - falls back to pyfetch for HTTP fetch from the JupyterLite contents
+    helper_lines = [
+        BOOTSTRAP_START_MARKER,
+        "import os, sys, io\n",
+        "async def _smart_open_bytes(path):\n",
+        "    \"\"\"Read a data file; fall back to HTTP fetch in JupyterLite.\"\"\"\n",
+        "    if os.path.exists(path):\n",
+        "        with open(path, 'rb') as _f:\n",
+        "            return _f.read()\n",
+        "    if 'pyodide' in sys.modules:\n",
+        "        from pyodide.http import pyfetch\n",
+        "        for _u in [f'files/{path}', f'./files/{path}', f'../files/{path}', f'/em-template-lite/lite/files/{path}']:\n",
+        "            try:\n",
+        "                _r = await pyfetch(_u)\n",
+        "                if _r.status == 200:\n",
+        "                    return await _r.bytes()\n",
+        "            except Exception:\n",
+        "                continue\n",
+        "        _diag = [f'cwd={os.getcwd()}']\n",
+        "        for _d in ['/', '/drive', '/files', '/home/pyodide']:\n",
+        "            try: _diag.append(f'{_d}={os.listdir(_d)[:5]}')\n",
+        "            except (FileNotFoundError, NotADirectoryError): _diag.append(f'{_d}=DNE')\n",
+        "        raise FileNotFoundError(f'{path} not loadable via FS or HTTP. Diag: {_diag}')\n",
+        "    raise FileNotFoundError(path)\n",
+        BOOTSTRAP_END_MARKER,
     ]
     for filename, pip_lines in bootstraps.items():
-        prepend_bootstrap(ROOT / filename, pip_lines + ["\n"] + chdir_lines)
+        prepend_bootstrap(ROOT / filename, pip_lines + ["\n"] + helper_lines)
+
+    # Per-notebook: rewrite the actual file-opening calls to go through the helper.
+    rewrite_data_loads()
 
     return 0
 
 
+def rewrite_data_loads() -> None:
+    """Replace direct `np.load(...)` and `h5py.File(...)` calls that reference
+    `data/...` paths with `_smart_open_bytes`-based equivalents.
+
+    Idempotent: detects the `_smart_open_bytes` marker before rewriting.
+    """
+    swaps = {
+        "01.interactive_image.ipynb": [
+            (
+                "np.load('data/im_graphene_EWR_small.npz')['im_graphene_EWR']",
+                "np.load(io.BytesIO(await _smart_open_bytes('data/im_graphene_EWR_small.npz')))['im_graphene_EWR']",
+            ),
+        ],
+        "02.animation_movie.ipynb": [
+            (
+                'np.load("data/45grains_frames.npz")',
+                'np.load(io.BytesIO(await _smart_open_bytes("data/45grains_frames.npz")))',
+            ),
+        ],
+        "03.interactive_movie.ipynb": [
+            (
+                'np.load("data/45grains_frames.npz")',
+                'np.load(io.BytesIO(await _smart_open_bytes("data/45grains_frames.npz")))',
+            ),
+        ],
+        "04.interactive_volume_slicing.ipynb": [
+            (
+                'h5py.File("data/CNT_overlap_tomo_missing.h5","r")',
+                'h5py.File(io.BytesIO(await _smart_open_bytes("data/CNT_overlap_tomo_missing.h5")), "r")',
+            ),
+        ],
+        "05.interactive_volume_rendering.ipynb": [
+            (
+                'h5py.File("data/CNT_overlap_tomo_missing.h5","r")',
+                'h5py.File(io.BytesIO(await _smart_open_bytes("data/CNT_overlap_tomo_missing.h5")), "r")',
+            ),
+        ],
+    }
+    for filename, pairs in swaps.items():
+        path = ROOT / filename
+        if not path.exists():
+            continue
+        nb = json.loads(path.read_text())
+        changed = False
+        for cell in nb["cells"]:
+            if cell["cell_type"] != "code":
+                continue
+            src = cell.get("source", "")
+            lines = src if isinstance(src, list) else src.splitlines(keepends=True)
+            for old, new in pairs:
+                for i, line in enumerate(lines):
+                    if old in line and new not in line:
+                        lines[i] = line.replace(old, new)
+                        changed = True
+            cell["source"] = lines
+        if changed:
+            path.write_text(json.dumps(nb, indent=1) + "\n")
+            print(f"[rewrote data loads] {filename}")
+        else:
+            print(f"[skip data loads] {filename} (already rewritten or pattern absent)")
+
+
 def prepend_bootstrap(path: Path, bootstrap_lines: list[str]) -> None:
-    """Insert a bootstrap block (pip install + chdir) at the top of the first
-    code cell of `path`.
+    """Insert a bootstrap block (pip install + JupyterLite helpers) at the top
+    of the first code cell of `path`.
 
-    Idempotent across the two markers we use:
-      - "pip install" implies the install line is already there
-      - "/drive"      implies the chdir line is already there
-
-    If either is found, the existing block is replaced wholesale so we can
-    safely re-run after the bootstrap content changes.
+    Idempotent: any block between BOOTSTRAP_START_MARKER and BOOTSTRAP_END_MARKER
+    (plus any leading `%pip install` line and surrounding blank lines) is
+    stripped before insertion. So re-running this script always yields the
+    current canonical bootstrap, regardless of what the previous run produced.
     """
     if not path.exists():
         print(f"[skip] {path.name} not found", file=sys.stderr)
@@ -193,17 +287,35 @@ def prepend_bootstrap(path: Path, bootstrap_lines: list[str]) -> None:
         src = cell.get("source", "")
         lines = src if isinstance(src, list) else src.splitlines(keepends=True)
 
-        # Strip any prior bootstrap block: contiguous lines mentioning
-        # `pip install` or `/drive`, plus any blank line immediately after.
-        marker = lambda ln: "pip install" in ln or "/drive" in ln or "os.chdir" in ln
-        if any(marker(ln) for ln in lines):
-            # Remove the first contiguous run of marker+context.
-            start = next(i for i, ln in enumerate(lines) if marker(ln))
-            end = start
-            while end < len(lines) and (marker(lines[end]) or lines[end].strip() == "" or lines[end].startswith("import os")):
+        # Strip prior bootstrap. Find the start marker; if present, drop from
+        # there to the end marker (inclusive). Also drop any %pip install line
+        # immediately before, and any surrounding blank lines, to keep the cell
+        # clean across re-runs.
+        if BOOTSTRAP_START_MARKER in lines:
+            start = lines.index(BOOTSTRAP_START_MARKER)
+            try:
+                end = lines.index(BOOTSTRAP_END_MARKER, start) + 1
+            except ValueError:
+                end = start + 1  # malformed; just remove the start marker
+            # Extend left across any blank/pip-install lines so we don't leave
+            # orphans behind.
+            while start > 0 and (lines[start - 1].strip() == "" or "pip install" in lines[start - 1]):
+                start -= 1
+            # Extend right across blank lines.
+            while end < len(lines) and lines[end].strip() == "":
                 end += 1
             lines = lines[:start] + lines[end:]
             print(f"[strip] {path.name} (removed prior bootstrap)")
+        elif any("pip install" in ln for ln in lines):
+            # Older-style bootstrap (no markers); strip the contiguous run
+            # around the pip install line.
+            marker = lambda ln: "pip install" in ln or "/drive" in ln or "os.chdir" in ln
+            start = next(i for i, ln in enumerate(lines) if marker(ln))
+            end = start
+            while end < len(lines) and (marker(lines[end]) or lines[end].strip() == "" or lines[end].lstrip().startswith("import os")):
+                end += 1
+            lines = lines[:start] + lines[end:]
+            print(f"[strip-legacy] {path.name} (removed pre-marker bootstrap)")
 
         # Insert after any leading comment/blank lines so `#| label:` stays at top.
         insert_at = 0

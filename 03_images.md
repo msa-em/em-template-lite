@@ -79,8 +79,8 @@ The figure below is the same exit-wave-reconstruction viewer, implemented as a k
 
 :::{anywidget} ./widgets/interactive-image.js
 {
-  "data_url": "./widgets/data/interactive_image.bin",
-  "meta_url": "./widgets/data/interactive_image.json"
+  "data_url": "../widgets/data/interactive_image.bin",
+  "meta_url": "../widgets/data/interactive_image.json"
 }
 :::
 
