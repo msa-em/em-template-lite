@@ -1,19 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/jupyterlite/jupyterlite/main/docs/schema-v0.json",
-  "jupyter-lite-schema-version": 0,
-  "jupyter-config-data": {
-    "appName": "EM Template Lite",
-    "appUrl": "./lite",
-    "fullStaticUrl": "./build",
-    "settingsOverrides": {
-      "@jupyterlab/apputils-extension:themes": {
-        "theme": "JupyterLab Light"
-      }
-    }
-  },
   "LiteBuildConfig": {
-    "contents": ["notebooks"],
-    "output_dir": "_output/lite",
     "no_unused_shared_packages": true
   }
 }
