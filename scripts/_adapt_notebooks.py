@@ -174,7 +174,9 @@ def main() -> int:
     #   - falls back to pyfetch for HTTP fetch from the JupyterLite contents
     helper_lines = [
         BOOTSTRAP_START_MARKER,
-        "import os, sys, io\n",
+        "import os, sys, io, logging\n",
+        "# Silence matplotlib's first-import font-cache build chatter.\n",
+        "logging.getLogger('matplotlib.font_manager').setLevel(logging.WARNING)\n",
         "async def _smart_open_bytes(path):\n",
         "    \"\"\"Read a data file; fall back to HTTP fetch in JupyterLite (no FS mount on GH Pages).\"\"\"\n",
         "    if os.path.exists(path):\n",

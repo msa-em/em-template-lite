@@ -68,8 +68,10 @@ async function loadData(dataUrl, metaUrl) {
 // ============================================================
 // Rendering
 // ============================================================
-function renderImage(canvas, frame, displayVmin, displayVmax, cmapName) {
-  // Map per-frame uint16 -> [vmin..vmax] float -> [0..1] -> [0..255] -> RGB.
+// Render at full source resolution into an offscreen canvas. Pan/zoom in the
+// viewer then becomes a cheap `drawImage(offscreen, srcRect, dstRect)` call
+// rather than recomputing the colormap on every interaction.
+function renderToOffscreen(canvas, frame, displayVmin, displayVmax, cmapName) {
   const { u16, H, W, vmin, vmax } = frame;
   const cmap = COLORMAPS[cmapName] || COLORMAPS.gray;
   canvas.width = W;
@@ -169,8 +171,8 @@ function render({ model, el }) {
          backgrounds; section headers go a bit darker so they stand out. */
       .${id}-wrap { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #888; font-size: 13px; line-height: 1.4; }
       .${id}-row { display: flex; gap: 18px; align-items: flex-start; flex-wrap: wrap; }
-      .${id}-img-box { position: relative; background: #fff; border-radius: 6px; }
-      .${id}-img-canvas { display: block; width: 480px; height: 480px; image-rendering: pixelated; cursor: crosshair; border-radius: 6px; }
+      .${id}-img-box { position: relative; background: #fff; border-radius: 6px; width: 480px; height: 480px; touch-action: none; user-select: none; }
+      .${id}-img-canvas { display: block; width: 100%; height: 100%; image-rendering: pixelated; cursor: crosshair; border-radius: 6px; }
       .${id}-controls { display: flex; flex-direction: column; gap: 14px; min-width: 220px; }
       .${id}-section-label { font-weight: 600; font-size: 12px; color: #888; letter-spacing: 0.02em; }
       .${id}-hist-canvas { display: block; width: 220px; height: 90px; background: rgb(191,191,191); border-radius: 4px; margin: 4px 0; cursor: ew-resize; touch-action: none; }
@@ -180,8 +182,22 @@ function render({ model, el }) {
       .${id}-ctrl select { padding: 4px 6px; font-size: 13px; border: 1px solid #bbb; border-radius: 4px; background: transparent; color: inherit; }
       .${id}-ctrl-inline { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; color: #888; }
       .${id}-loading { padding: 20px; color: #888; font-size: 13px; }
-      .${id}-scalebar { position: absolute; left: 5%; bottom: 7%; height: 5px; background: #fff; box-shadow: 0 0 2px rgba(0,0,0,0.6); border-radius: 1px; }
-      .${id}-scalebar-label { position: absolute; left: 5%; bottom: calc(7% + 9px); color: #fff; text-shadow: 0 0 3px #000, 0 0 3px #000; font-size: 12px; font-weight: 600; }
+      .${id}-scalebar { position: absolute; left: 5%; bottom: 7%; height: 5px; background: #fff; box-shadow: 0 0 2px rgba(0,0,0,0.6); border-radius: 1px; pointer-events: none; }
+      .${id}-scalebar-label { position: absolute; left: 5%; bottom: calc(7% + 9px); color: #fff; text-shadow: 0 0 3px #000, 0 0 3px #000; font-size: 12px; font-weight: 600; pointer-events: none; }
+      /* Overlay controls on the image canvas */
+      .${id}-reset { position: absolute; top: 8px; right: 8px; background: rgba(0,0,0,0.55); color: #fff; border: none; padding: 4px 10px; border-radius: 4px; font-size: 12px; cursor: pointer; font-family: inherit; }
+      .${id}-reset:hover { background: rgba(0,0,0,0.75); }
+      .${id}-help-wrap { position: absolute; bottom: 8px; right: 8px; }
+      .${id}-help-btn { background: rgba(0,0,0,0.55); color: #fff; padding: 4px 10px; border-radius: 4px; font-size: 12px; cursor: help; user-select: none; }
+      .${id}-help-tip { display: none; position: absolute; bottom: calc(100% + 6px); right: 0; background: rgba(0,0,0,0.92); color: #fff; padding: 10px 12px; border-radius: 4px; font-size: 12px; line-height: 1.6; width: 220px; white-space: normal; pointer-events: none; }
+      .${id}-help-wrap:hover .${id}-help-tip { display: block; }
+      .${id}-help-tip kbd { background: rgba(255,255,255,0.15); padding: 0 4px; border-radius: 2px; font-family: ui-monospace, monospace; font-size: 11px; }
+      .${id}-meta { display: none; position: absolute; background: rgba(0,0,0,0.92); color: #fff; padding: 10px 12px; border-radius: 4px; font-size: 12px; line-height: 1.6; max-width: 280px; z-index: 10; pointer-events: auto; }
+      .${id}-meta strong { color: #ffd; font-weight: 500; }
+      .${id}-meta .${id}-meta-close { position: absolute; top: 2px; right: 6px; cursor: pointer; opacity: 0.7; }
+      .${id}-meta .${id}-meta-close:hover { opacity: 1; }
+      .${id}-img-box.${id}-pan-mode .${id}-img-canvas { cursor: grab; }
+      .${id}-img-box.${id}-panning .${id}-img-canvas { cursor: grabbing; }
     </style>
     <div class="${id}-wrap">
       <div class="${id}-loading">Loading image data…</div>
@@ -193,9 +209,21 @@ function render({ model, el }) {
     wrap.innerHTML = `
       <div class="${id}-row">
         <div class="${id}-img-box">
-          <canvas class="${id}-img-canvas"></canvas>
+          <canvas class="${id}-img-canvas" width="480" height="480"></canvas>
           <div class="${id}-scalebar"></div>
           <div class="${id}-scalebar-label"></div>
+          <button class="${id}-reset" type="button" title="Reset view to full image">Reset</button>
+          <div class="${id}-help-wrap">
+            <div class="${id}-help-btn">Controls</div>
+            <div class="${id}-help-tip">
+              <strong>Left drag</strong>: zoom to box<br>
+              <strong>Middle drag</strong> or <kbd>Shift</kbd>+drag: pan<br>
+              <strong>Wheel</strong>: zoom in / out<br>
+              <strong>Right click</strong>: image metadata<br>
+              <strong>Reset</strong>: restore full view
+            </div>
+          </div>
+          <div class="${id}-meta"></div>
         </div>
         <div class="${id}-controls">
           <div class="${id}-ctrl">
@@ -221,6 +249,7 @@ function render({ model, el }) {
       </div>`;
 
     const $ = (sel) => wrap.querySelector(sel);
+    const imgBox = $(`.${id}-img-box`);
     const imgCanvas = $(`.${id}-img-canvas`);
     const histCanvas = $(`.${id}-hist-canvas`);
     const vminVal = $(`.${id}-vmin-val`);
@@ -230,39 +259,245 @@ function render({ model, el }) {
     const scalebarToggle = $(`.${id}-scalebar-toggle`);
     const scalebarEl = $(`.${id}-scalebar`);
     const scalebarLabel = $(`.${id}-scalebar-label`);
+    const resetBtn = $(`.${id}-reset`);
+    const metaEl = $(`.${id}-meta`);
 
     let frameIdx = 0;
     let cmapName = "gray";
 
-    // Per-frame display ranges. Initial = mean ± std (matches the original
-    // matplotlib notebook). Mutated by drag, preserved across frame switches.
+    // Per-frame display ranges and viewports. The viewport (`view`) is a
+    // rectangle in *source pixel* coordinates that the display canvas crops
+    // to. Initial = full image. Both are persisted across frame switches so
+    // toggling phase/amplitude doesn't reset what the reader was looking at.
     const frameRanges = frames.map((f) => ({
       vmin: f.mean - 1 * f.std,
       vmax: f.mean + 2 * f.std,
     }));
+    const frameViews = frames.map((f) => ({ x0: 0, y0: 0, x1: f.W, y1: f.H }));
+
+    // Offscreen canvas with the full-resolution colormapped image. Recomputed
+    // when frame / cmap / vmin / vmax change. Pan/zoom is then a cheap
+    // drawImage(..., srcRect, dstRect) instead of remapping all 2M pixels.
+    const offscreen = document.createElement("canvas");
+    let offscreenKey = "";  // identifier for "what's currently in offscreen"
+
+    function ensureOffscreen() {
+      const f = frames[frameIdx];
+      const r = frameRanges[frameIdx];
+      const key = `${frameIdx}|${cmapName}|${r.vmin.toFixed(6)}|${r.vmax.toFixed(6)}`;
+      if (key === offscreenKey) return;
+      renderToOffscreen(offscreen, f, r.vmin, r.vmax, cmapName);
+      offscreenKey = key;
+    }
+
+    function presentView() {
+      const v = frameViews[frameIdx];
+      const ctx = imgCanvas.getContext("2d");
+      const dw = imgCanvas.width, dh = imgCanvas.height;
+      ctx.imageSmoothingEnabled = false;
+      ctx.clearRect(0, 0, dw, dh);
+      ctx.drawImage(offscreen, v.x0, v.y0, v.x1 - v.x0, v.y1 - v.y0, 0, 0, dw, dh);
+      drawZoomBox(ctx);
+      updateScaleBar();
+    }
+
+    function drawZoomBox(ctx) {
+      if (!zoomBox) return;
+      const v = frameViews[frameIdx];
+      const dw = imgCanvas.width, dh = imgCanvas.height;
+      const sw = v.x1 - v.x0, sh = v.y1 - v.y0;
+      const dx0 = ((zoomBox.x0 - v.x0) / sw) * dw;
+      const dy0 = ((zoomBox.y0 - v.y0) / sh) * dh;
+      const dx1 = ((zoomBox.x1 - v.x0) / sw) * dw;
+      const dy1 = ((zoomBox.y1 - v.y0) / sh) * dh;
+      ctx.save();
+      ctx.strokeStyle = "rgba(255, 235, 50, 0.95)";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([5, 4]);
+      ctx.strokeRect(Math.min(dx0, dx1), Math.min(dy0, dy1),
+        Math.abs(dx1 - dx0), Math.abs(dy1 - dy0));
+      ctx.restore();
+    }
+
+    function updateScaleBar() {
+      const f = frames[frameIdx];
+      const v = frameViews[frameIdx];
+      const sbLenSrcPx = meta.scalebar_length_nm / meta.pixel_size_nm;
+      const viewW = v.x1 - v.x0;
+      const sbLenDispPx = (sbLenSrcPx / viewW) * imgCanvas.clientWidth;
+      scalebarEl.style.width = `${sbLenDispPx}px`;
+      scalebarLabel.textContent = `${meta.scalebar_length_nm} nm`;
+    }
 
     function paint() {
       const f = frames[frameIdx];
       const r = frameRanges[frameIdx];
-      // Clamp to the frame's full data range
+      // Clamp value range
       r.vmin = Math.max(f.vmin, Math.min(r.vmin, f.vmax));
       r.vmax = Math.max(f.vmin, Math.min(r.vmax, f.vmax));
       if (r.vmin >= r.vmax) r.vmin = r.vmax - (f.vmax - f.vmin) / 1000;
       vminVal.textContent = r.vmin.toFixed(4);
       vmaxVal.textContent = r.vmax.toFixed(4);
-      renderImage(imgCanvas, f, r.vmin, r.vmax, cmapName);
+      ensureOffscreen();
+      presentView();
       renderHistogram(histCanvas, f, r.vmin, r.vmax, cmapName);
-      const sbLenSrcPx = meta.scalebar_length_nm / meta.pixel_size_nm;
-      const sbLenDispPx = (sbLenSrcPx / f.W) * imgCanvas.clientWidth;
-      scalebarEl.style.width = `${sbLenDispPx}px`;
-      scalebarLabel.textContent = `${meta.scalebar_length_nm} nm`;
     }
 
-    // --- Histogram drag: dual-handle range. Pointer events fire inside shadow
-    // DOM; we use setPointerCapture so the drag continues even when the cursor
-    // moves off the canvas vertically (no "drop on move off horizontal line").
-    let dragging = null;  // "vmin" | "vmax" | null
+    // -----------------------------------------------------------
+    // Viewport pointer events: zoom-box, pan, wheel, contextmenu
+    // -----------------------------------------------------------
+    let zoomBox = null;          // {x0,y0,x1,y1} in source pixels during drag
+    let panState = null;         // {lastX, lastY} during pan
+    let mode = null;             // "zoom-box" | "pan" | null
 
+    function eventToView(e) {
+      const rect = imgCanvas.getBoundingClientRect();
+      const dx = ((e.clientX - rect.left) / rect.width) * imgCanvas.width;
+      const dy = ((e.clientY - rect.top) / rect.height) * imgCanvas.height;
+      const v = frameViews[frameIdx];
+      return {
+        x: v.x0 + (dx / imgCanvas.width) * (v.x1 - v.x0),
+        y: v.y0 + (dy / imgCanvas.height) * (v.y1 - v.y0),
+      };
+    }
+
+    function clampView(v) {
+      const f = frames[frameIdx];
+      const w = Math.min(v.x1 - v.x0, f.W);
+      const h = Math.min(v.y1 - v.y0, f.H);
+      if (v.x0 < 0) { v.x0 = 0; v.x1 = w; }
+      if (v.y0 < 0) { v.y0 = 0; v.y1 = h; }
+      if (v.x1 > f.W) { v.x1 = f.W; v.x0 = f.W - w; }
+      if (v.y1 > f.H) { v.y1 = f.H; v.y0 = f.H - h; }
+      if (v.x0 < 0) v.x0 = 0;
+      if (v.y0 < 0) v.y0 = 0;
+    }
+
+    imgCanvas.addEventListener("pointerdown", (e) => {
+      hideMeta();
+      // Middle button OR Shift+left = pan; left alone = zoom-box; right = context.
+      if (e.button === 1 || (e.button === 0 && e.shiftKey)) {
+        mode = "pan";
+        panState = { lastX: e.clientX, lastY: e.clientY };
+        imgBox.classList.add(`${id}-panning`);
+        imgCanvas.setPointerCapture(e.pointerId);
+        e.preventDefault();
+      } else if (e.button === 0) {
+        mode = "zoom-box";
+        const p = eventToView(e);
+        zoomBox = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
+        imgCanvas.setPointerCapture(e.pointerId);
+        e.preventDefault();
+      }
+    });
+
+    imgCanvas.addEventListener("pointermove", (e) => {
+      if (mode === "zoom-box" && zoomBox) {
+        const p = eventToView(e);
+        zoomBox.x1 = p.x; zoomBox.y1 = p.y;
+        presentView();
+      } else if (mode === "pan" && panState) {
+        const v = frameViews[frameIdx];
+        const sw = v.x1 - v.x0, sh = v.y1 - v.y0;
+        const dxSrc = -((e.clientX - panState.lastX) / imgCanvas.clientWidth) * sw;
+        const dySrc = -((e.clientY - panState.lastY) / imgCanvas.clientHeight) * sh;
+        v.x0 += dxSrc; v.x1 += dxSrc;
+        v.y0 += dySrc; v.y1 += dySrc;
+        clampView(v);
+        panState.lastX = e.clientX;
+        panState.lastY = e.clientY;
+        presentView();
+      }
+    });
+
+    const endPointer = (e) => {
+      if (mode === "zoom-box" && zoomBox) {
+        const v = frameViews[frameIdx];
+        const dx = Math.abs(zoomBox.x1 - zoomBox.x0);
+        const dy = Math.abs(zoomBox.y1 - zoomBox.y0);
+        if (dx > 4 && dy > 4) {
+          v.x0 = Math.min(zoomBox.x0, zoomBox.x1);
+          v.x1 = Math.max(zoomBox.x0, zoomBox.x1);
+          v.y0 = Math.min(zoomBox.y0, zoomBox.y1);
+          v.y1 = Math.max(zoomBox.y0, zoomBox.y1);
+          clampView(v);
+        }
+        zoomBox = null;
+        presentView();
+      }
+      mode = null;
+      panState = null;
+      imgBox.classList.remove(`${id}-panning`);
+      try { imgCanvas.releasePointerCapture(e.pointerId); } catch (_) {}
+    };
+    imgCanvas.addEventListener("pointerup", endPointer);
+    imgCanvas.addEventListener("pointercancel", endPointer);
+
+    imgCanvas.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const f = frames[frameIdx];
+      const v = frameViews[frameIdx];
+      const p = eventToView(e);
+      const sw = v.x1 - v.x0, sh = v.y1 - v.y0;
+      const factor = Math.exp(e.deltaY * 0.0015);  // wheel-up = deltaY<0 = zoom-in
+      let newSw = sw * factor, newSh = sh * factor;
+      // Cap at full image (zoom-out limit)
+      if (newSw > f.W) { newSh *= f.W / newSw; newSw = f.W; }
+      if (newSh > f.H) { newSw *= f.H / newSh; newSh = f.H; }
+      // Cap minimum view size (zoom-in limit)
+      const minPx = 16;
+      if (newSw < minPx) { newSh *= minPx / newSw; newSw = minPx; }
+      if (newSh < minPx) { newSw *= minPx / newSh; newSh = minPx; }
+      // Keep the cursor position invariant
+      v.x0 = p.x - (p.x - v.x0) * (newSw / sw);
+      v.y0 = p.y - (p.y - v.y0) * (newSh / sh);
+      v.x1 = v.x0 + newSw;
+      v.y1 = v.y0 + newSh;
+      clampView(v);
+      presentView();
+    }, { passive: false });
+
+    imgCanvas.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      showMeta(e);
+    });
+
+    function showMeta(e) {
+      const f = frames[frameIdx];
+      const v = frameViews[frameIdx];
+      const boxRect = imgBox.getBoundingClientRect();
+      // Position popup near the click, clamped inside the image box
+      const x = Math.min(e.clientX - boxRect.left, boxRect.width - 290);
+      const y = Math.min(e.clientY - boxRect.top, boxRect.height - 200);
+      metaEl.style.left = `${Math.max(8, x)}px`;
+      metaEl.style.top = `${Math.max(8, y)}px`;
+      metaEl.innerHTML = `
+        <span class="${id}-meta-close" title="close">×</span>
+        <div><strong>Frame</strong>: ${f.label}</div>
+        <div><strong>Source shape</strong>: ${f.W} × ${f.H} px</div>
+        <div><strong>Pixel size</strong>: ${meta.pixel_size_nm.toFixed(4)} nm/px</div>
+        <div><strong>Data range</strong>: ${f.vmin.toFixed(4)} … ${f.vmax.toFixed(4)}</div>
+        <div><strong>Mean ± std</strong>: ${f.mean.toFixed(4)} ± ${f.std.toFixed(4)}</div>
+        <div><strong>Display range</strong>: ${frameRanges[frameIdx].vmin.toFixed(4)} … ${frameRanges[frameIdx].vmax.toFixed(4)}</div>
+        <div><strong>View</strong>: (${v.x0.toFixed(0)}, ${v.y0.toFixed(0)}) → (${v.x1.toFixed(0)}, ${v.y1.toFixed(0)})</div>
+      `;
+      metaEl.style.display = "block";
+      const closeBtn = metaEl.querySelector(`.${id}-meta-close`);
+      if (closeBtn) closeBtn.addEventListener("click", hideMeta);
+    }
+    function hideMeta() { metaEl.style.display = "none"; }
+
+    resetBtn.addEventListener("click", () => {
+      const f = frames[frameIdx];
+      frameViews[frameIdx] = { x0: 0, y0: 0, x1: f.W, y1: f.H };
+      hideMeta();
+      presentView();
+    });
+
+    // -----------------------------------------------------------
+    // Histogram drag: dual-handle range (unchanged from before)
+    // -----------------------------------------------------------
+    let dragging = null;
     function canvasXFromEvent(e) {
       const rect = histCanvas.getBoundingClientRect();
       return ((e.clientX - rect.left) / rect.width) * histCanvas.width;
@@ -272,35 +507,32 @@ function render({ model, el }) {
       const t = Math.max(0, Math.min(1, x / histCanvas.width));
       return f.vmin + t * (f.vmax - f.vmin);
     }
-    function xFromValue(v) {
+    function xFromValue(val) {
       const f = frames[frameIdx];
-      return ((v - f.vmin) / (f.vmax - f.vmin)) * histCanvas.width;
+      return ((val - f.vmin) / (f.vmax - f.vmin)) * histCanvas.width;
     }
-
     histCanvas.addEventListener("pointerdown", (e) => {
       e.preventDefault();
       const x = canvasXFromEvent(e);
       const r = frameRanges[frameIdx];
-      // Pick whichever handle is closer to the click.
       const dMin = Math.abs(x - xFromValue(r.vmin));
       const dMax = Math.abs(x - xFromValue(r.vmax));
       dragging = dMin <= dMax ? "vmin" : "vmax";
       histCanvas.setPointerCapture(e.pointerId);
-      applyDrag(x);
+      applyHistDrag(x);
     });
     histCanvas.addEventListener("pointermove", (e) => {
       if (!dragging) return;
-      applyDrag(canvasXFromEvent(e));
+      applyHistDrag(canvasXFromEvent(e));
     });
-    const endDrag = (e) => {
+    const endHistDrag = (e) => {
       if (!dragging) return;
       dragging = null;
       try { histCanvas.releasePointerCapture(e.pointerId); } catch (_) {}
     };
-    histCanvas.addEventListener("pointerup", endDrag);
-    histCanvas.addEventListener("pointercancel", endDrag);
-
-    function applyDrag(x) {
+    histCanvas.addEventListener("pointerup", endHistDrag);
+    histCanvas.addEventListener("pointercancel", endHistDrag);
+    function applyHistDrag(x) {
       const f = frames[frameIdx];
       const r = frameRanges[frameIdx];
       const eps = (f.vmax - f.vmin) / 1000;
@@ -314,7 +546,8 @@ function render({ model, el }) {
 
     frameSel.addEventListener("change", () => {
       frameIdx = parseInt(frameSel.value, 10);
-      paint();  // uses frameRanges[frameIdx] — preserved across switches
+      hideMeta();
+      paint();
     });
     cmapSel.addEventListener("change", () => { cmapName = cmapSel.value; paint(); });
     scalebarToggle.addEventListener("change", () => {
