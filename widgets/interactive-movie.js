@@ -166,13 +166,15 @@ function render({ model, el }) {
       /* Labels use a medium gray that reads well on both light and dark
          backgrounds; section headers go a bit darker so they stand out. */
       .${id}-wrap { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #888; font-size: 13px; line-height: 1.4; }
-      /* Sized to fit a ~700 px article column: 440 + 12 + 42 + 12 + 190 = 696 */
-      .${id}-row { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
-      .${id}-img-box { position: relative; background: #fff; border-radius: 6px; width: 440px; height: 440px; touch-action: none; user-select: none; flex-shrink: 0; }
+      /* Sized to fit a ~700 px article column: 42 + 10 + 420 + 10 + 210 = 692.
+         Image is slightly narrower than the image-widget to leave room for the
+         play/loop/bounce row in the controls column. */
+      .${id}-row { display: flex; gap: 10px; align-items: flex-start; flex-wrap: wrap; }
+      .${id}-img-box { position: relative; background: #fff; border-radius: 6px; width: 420px; height: 420px; touch-action: none; user-select: none; flex-shrink: 0; }
       .${id}-img-canvas { display: block; width: 100%; height: 100%; image-rendering: pixelated; cursor: crosshair; border-radius: 6px; }
-      .${id}-controls { display: flex; flex-direction: column; gap: 12px; width: 190px; flex-shrink: 0; }
+      .${id}-controls { display: flex; flex-direction: column; gap: 12px; width: 210px; flex-shrink: 0; }
       .${id}-section-label { font-weight: 600; font-size: 11px; color: #888; letter-spacing: 0.02em; }
-      .${id}-hist-canvas { display: block; width: 190px; height: 80px; background: rgb(191,191,191); border-radius: 4px; margin: 2px 0; cursor: ew-resize; touch-action: none; }
+      .${id}-hist-canvas { display: block; width: 210px; height: 80px; background: rgb(191,191,191); border-radius: 4px; margin: 2px 0; cursor: ew-resize; touch-action: none; }
       .${id}-hist-values { display: flex; justify-content: space-between; font-size: 11px; font-variant-numeric: tabular-nums; color: #888; }
       .${id}-hist-values .${id}-val { color: currentColor; font-weight: 500; }
       .${id}-ctrl { display: flex; flex-direction: column; gap: 3px; }
@@ -196,20 +198,20 @@ function render({ model, el }) {
       .${id}-img-box.${id}-pan-mode .${id}-img-canvas { cursor: grab; }
       .${id}-img-box.${id}-panning .${id}-img-canvas { cursor: grabbing; }
       .${id}-readout { display: none; position: absolute; background: rgba(0,0,0,0.85); color: #fff; padding: 3px 8px; border-radius: 3px; font-size: 11px; font-family: ui-monospace, SFMono-Regular, monospace; pointer-events: none; white-space: nowrap; z-index: 11; }
-      /* Colorbar: 12 canvas + 4 gap + ~26 numeric label = 42 px column */
-      .${id}-colorbar-wrap { position: relative; height: 440px; width: 42px; flex-shrink: 0; }
+      /* Colorbar (left edge): 12 canvas + 4 gap + ~26 numeric label = 42 px column */
+      .${id}-colorbar-wrap { position: relative; height: 420px; width: 42px; flex-shrink: 0; }
       .${id}-colorbar-canvas { display: block; width: 12px; height: 100%; border-radius: 2px; }
       .${id}-cb-tick { position: absolute; left: 18px; font-size: 10px; color: #888; font-variant-numeric: tabular-nums; white-space: nowrap; line-height: 1; transform: translateY(-50%); }
       .${id}-cb-tick::before { content: ''; position: absolute; left: -5px; top: 50%; width: 4px; height: 1px; background: currentColor; }
-      /* Playback controls */
-      .${id}-pb-buttons { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
-      .${id}-pb-btn { background: transparent; border: 1px solid #bbb; color: inherit; padding: 3px 8px; border-radius: 4px; font-size: 12px; cursor: pointer; font-family: inherit; line-height: 1.2; }
+      /* Playback controls — all three buttons fit on one row in a 210 px column */
+      .${id}-pb-buttons { display: flex; gap: 4px; flex-wrap: nowrap; align-items: center; }
+      .${id}-pb-btn { background: transparent; border: 1px solid #bbb; color: inherit; padding: 3px 6px; border-radius: 4px; font-size: 11px; cursor: pointer; font-family: inherit; line-height: 1.2; white-space: nowrap; flex: 0 0 auto; }
       .${id}-pb-btn:hover { background: rgba(128,128,128,0.12); }
       .${id}-pb-btn.${id}-active { background: rgba(60,140,80,0.18); border-color: rgb(60,140,80); color: rgb(40,110,60); }
-      .${id}-pb-play-btn { min-width: 56px; }
+      .${id}-pb-play-btn { flex: 1 1 auto; min-width: 0; }
       .${id}-pb-slider-row { display: flex; align-items: center; gap: 6px; }
-      .${id}-pb-slider { flex: 1; margin: 0; }
-      .${id}-pb-counter { font-size: 11px; color: #888; font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 56px; text-align: right; }
+      .${id}-pb-slider { flex: 1; margin: 0; min-width: 0; }
+      .${id}-pb-counter { font-size: 11px; color: #888; font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 50px; text-align: right; }
     </style>
     <div class="${id}-wrap">
       <div class="${id}-loading">Loading movie data…</div>
@@ -221,17 +223,21 @@ function render({ model, el }) {
     const nFrames = frames.length;
     wrap.innerHTML = `
       <div class="${id}-row">
+        <div class="${id}-colorbar-wrap">
+          <canvas class="${id}-colorbar-canvas" width="12" height="420"></canvas>
+        </div>
         <div class="${id}-img-box">
-          <canvas class="${id}-img-canvas" width="440" height="440"></canvas>
+          <canvas class="${id}-img-canvas" width="420" height="420"></canvas>
           <div class="${id}-scalebar"></div>
           <div class="${id}-scalebar-label"></div>
-          <button class="${id}-reset" type="button" title="Reset view to full image">Reset</button>
+          <button class="${id}-reset" type="button" title="Reset view, range, and colormap">Reset</button>
           <div class="${id}-help-wrap">
             <div class="${id}-help-btn">Controls</div>
             <div class="${id}-help-tip">
-              <strong>Left press</strong>: pixel value readout (follows cursor)<br>
+              <strong>Hover</strong>: pixel value readout<br>
+              <strong>Left click</strong>: center view on click<br>
               <strong>Left drag</strong>: zoom to box (square)<br>
-              <strong>Double click</strong>: reset to full view<br>
+              <strong>Double click</strong>: reset everything<br>
               <strong>Middle drag</strong> or <kbd>Shift</kbd>+drag: pan<br>
               <strong>Wheel</strong>: zoom in / out<br>
               <strong>Right click</strong>: image metadata
@@ -239,9 +245,6 @@ function render({ model, el }) {
           </div>
           <div class="${id}-meta"></div>
           <div class="${id}-readout"></div>
-        </div>
-        <div class="${id}-colorbar-wrap">
-          <canvas class="${id}-colorbar-canvas" width="12" height="440"></canvas>
         </div>
         <div class="${id}-controls">
           <div class="${id}-ctrl">
@@ -436,17 +439,19 @@ function render({ model, el }) {
     }
 
     // -----------------------------------------------------------
-    // Viewport pointer events: zoom-box (with live readout), pan, wheel, dblclick, contextmenu
+    // Viewport pointer events
     //
-    // Left press shows the pixel-value readout immediately and follows the
-    // cursor. If the user drags far enough, we also draw the zoom-box rect;
-    // on release a significant drag commits the zoom. Release always hides
-    // the readout. Middle button (or Shift+left) is pan. Double-click resets.
+    // Pixel-value readout: always on while the cursor is over the image.
+    // Left click: center view on click (220 ms debounce so a double-click
+    // takes over as a full reset). Left drag: rubber-band zoom to box.
+    // Middle button or Shift+left: pan. Wheel zooms. Right-click metadata.
     // -----------------------------------------------------------
-    const DRAG_PX = 4;             // movement threshold to commit a zoom-box
-    let zoomBox = null;            // {x0,y0,x1,y1} during a zoom-box drag
-    let panState = null;           // {lastX, lastY} during pan
-    let mode = null;               // "zoom-box" | "pan" | null
+    const DRAG_PX = 4;
+    const CLICK_DEBOUNCE_MS = 220;
+    let zoomBox = null;
+    let panState = null;
+    let pendingClickTimer = null;
+    let mode = null;
 
     function eventToView(e) {
       const rect = imgCanvas.getBoundingClientRect();
@@ -471,8 +476,16 @@ function render({ model, el }) {
       if (v.y0 < 0) v.y0 = 0;
     }
 
+    // Always-on readout: visible whenever the cursor is over the image.
+    imgCanvas.addEventListener("pointerenter", (e) => {
+      const p = eventToView(e);
+      updateReadout(e.clientX, e.clientY, p.x, p.y);
+    });
+    imgCanvas.addEventListener("pointerleave", () => { hideReadout(); });
+
     imgCanvas.addEventListener("pointerdown", (e) => {
       hideMeta();
+      if (pendingClickTimer) { clearTimeout(pendingClickTimer); pendingClickTimer = null; }
       if (e.button === 1 || (e.button === 0 && e.shiftKey)) {
         mode = "pan";
         panState = { lastX: e.clientX, lastY: e.clientY };
@@ -480,23 +493,19 @@ function render({ model, el }) {
         imgCanvas.setPointerCapture(e.pointerId);
         e.preventDefault();
       } else if (e.button === 0) {
-        // Left press: live readout + tentative zoom-box. The box only commits
-        // on release if the drag was significant; otherwise it's a no-op
-        // (and just dismisses the readout).
         const p = eventToView(e);
         mode = "zoom-box";
         zoomBox = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
         imgCanvas.setPointerCapture(e.pointerId);
-        updateReadout(e.clientX, e.clientY, p.x, p.y);
         e.preventDefault();
       }
     });
 
     imgCanvas.addEventListener("pointermove", (e) => {
+      const p = eventToView(e);
+      updateReadout(e.clientX, e.clientY, p.x, p.y);
       if (mode === "zoom-box" && zoomBox) {
-        const p = eventToView(e);
         zoomBox.x1 = p.x; zoomBox.y1 = p.y;
-        updateReadout(e.clientX, e.clientY, p.x, p.y);
         presentView();
       } else if (mode === "pan" && panState) {
         const v = view;
@@ -524,11 +533,21 @@ function render({ model, el }) {
           v.x0 = cx - side / 2; v.x1 = cx + side / 2;
           v.y0 = cy - side / 2; v.y1 = cy + side / 2;
           clampView(v);
+        } else {
+          // Click-to-center, debounced so a dblclick (full reset) can win.
+          const pos = { x: zoomBox.x0, y: zoomBox.y0 };
+          pendingClickTimer = setTimeout(() => {
+            pendingClickTimer = null;
+            const w = view.x1 - view.x0, h = view.y1 - view.y0;
+            view.x0 = pos.x - w / 2; view.x1 = pos.x + w / 2;
+            view.y0 = pos.y - h / 2; view.y1 = pos.y + h / 2;
+            clampView(view);
+            presentView();
+          }, CLICK_DEBOUNCE_MS);
         }
         zoomBox = null;
         presentView();
       }
-      hideReadout();
       mode = null;
       panState = null;
       imgBox.classList.remove(`${id}-panning`);
@@ -558,14 +577,22 @@ function render({ model, el }) {
     }
     function hideReadout() { readoutEl.style.display = "none"; }
 
-    // Double left-click: reset to full FOV.
-    imgCanvas.addEventListener("dblclick", (e) => {
-      e.preventDefault();
+    // Full reset: view, display range, colormap. (Playback state is left
+    // intact — restarting from the beginning isn't usually what you want.)
+    function resetAll() {
+      if (pendingClickTimer) { clearTimeout(pendingClickTimer); pendingClickTimer = null; }
       const f = frames[frameIdx];
       view.x0 = 0; view.y0 = 0; view.x1 = f.W; view.y1 = f.H;
+      range.vmin = Math.max(0, stats.mean - 2 * stats.std);
+      range.vmax = Math.min(255, stats.mean + 1 * stats.std);
+      cmapName = "gray";
+      cmapSel.value = "gray";
       hideMeta();
-      hideReadout();
-      presentView();
+      paint();
+    }
+    imgCanvas.addEventListener("dblclick", (e) => {
+      e.preventDefault();
+      resetAll();
     });
 
     imgCanvas.addEventListener("wheel", (e) => {
@@ -617,12 +644,7 @@ function render({ model, el }) {
     }
     function hideMeta() { metaEl.style.display = "none"; }
 
-    resetBtn.addEventListener("click", () => {
-      const f = frames[frameIdx];
-      view.x0 = 0; view.y0 = 0; view.x1 = f.W; view.y1 = f.H;
-      hideMeta();
-      presentView();
-    });
+    resetBtn.addEventListener("click", () => { resetAll(); });
 
     // -----------------------------------------------------------
     // Histogram drag: dual-handle range (unchanged from before)

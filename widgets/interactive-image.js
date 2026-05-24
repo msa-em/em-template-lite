@@ -215,17 +215,21 @@ function render({ model, el }) {
   loadData(dataUrl, metaUrl).then(({ frames, meta }) => {
     wrap.innerHTML = `
       <div class="${id}-row">
+        <div class="${id}-colorbar-wrap">
+          <canvas class="${id}-colorbar-canvas" width="12" height="440"></canvas>
+        </div>
         <div class="${id}-img-box">
           <canvas class="${id}-img-canvas" width="440" height="440"></canvas>
           <div class="${id}-scalebar"></div>
           <div class="${id}-scalebar-label"></div>
-          <button class="${id}-reset" type="button" title="Reset view to full image">Reset</button>
+          <button class="${id}-reset" type="button" title="Reset view, range, and colormap">Reset</button>
           <div class="${id}-help-wrap">
             <div class="${id}-help-btn">Controls</div>
             <div class="${id}-help-tip">
-              <strong>Left press</strong>: pixel value readout (follows cursor)<br>
+              <strong>Hover</strong>: pixel value readout<br>
+              <strong>Left click</strong>: center view on click<br>
               <strong>Left drag</strong>: zoom to box (square)<br>
-              <strong>Double click</strong>: reset to full view<br>
+              <strong>Double click</strong>: reset everything<br>
               <strong>Middle drag</strong> or <kbd>Shift</kbd>+drag: pan<br>
               <strong>Wheel</strong>: zoom in / out<br>
               <strong>Right click</strong>: image metadata
@@ -233,9 +237,6 @@ function render({ model, el }) {
           </div>
           <div class="${id}-meta"></div>
           <div class="${id}-readout"></div>
-        </div>
-        <div class="${id}-colorbar-wrap">
-          <canvas class="${id}-colorbar-canvas" width="12" height="440"></canvas>
         </div>
         <div class="${id}-controls">
           <div class="${id}-ctrl">
@@ -413,16 +414,24 @@ function render({ model, el }) {
     }
 
     // -----------------------------------------------------------
-    // Viewport pointer events: zoom-box (with live readout), pan, wheel, dblclick, contextmenu
+    // Viewport pointer events
     //
-    // Left press shows the pixel-value readout immediately and follows the
-    // cursor. If the user drags far enough, we also draw the zoom-box rect;
-    // on release a significant drag commits the zoom. Release always hides
-    // the readout. Middle button (or Shift+left) is pan. Double-click resets.
+    // Pixel-value readout: always visible while the cursor is over the image
+    // (pointerenter -> pointermove -> pointerleave). Independent of clicks.
+    //
+    // Left button:
+    //   click (no drag)  -> center view on click point (220 ms debounce so
+    //                       a follow-up double-click can take over)
+    //   drag (>= 4 px)   -> rubber-band zoom to box
+    //   double-click     -> full reset (view + display range + colormap)
+    //
+    // Middle button or Shift+left -> pan. Wheel zooms. Right-click metadata.
     // -----------------------------------------------------------
-    const DRAG_PX = 4;             // movement threshold to commit a zoom-box
-    let zoomBox = null;            // {x0,y0,x1,y1} during a zoom-box drag
-    let panState = null;           // {lastX, lastY} during pan
+    const DRAG_PX = 4;
+    const CLICK_DEBOUNCE_MS = 220;
+    let zoomBox = null;
+    let panState = null;
+    let pendingClickTimer = null;
     let mode = null;               // "zoom-box" | "pan" | null
 
     function eventToView(e) {
@@ -448,8 +457,16 @@ function render({ model, el }) {
       if (v.y0 < 0) v.y0 = 0;
     }
 
+    // Always-on readout: visible whenever the cursor is over the image.
+    imgCanvas.addEventListener("pointerenter", (e) => {
+      const p = eventToView(e);
+      updateReadout(e.clientX, e.clientY, p.x, p.y);
+    });
+    imgCanvas.addEventListener("pointerleave", () => { hideReadout(); });
+
     imgCanvas.addEventListener("pointerdown", (e) => {
       hideMeta();
+      if (pendingClickTimer) { clearTimeout(pendingClickTimer); pendingClickTimer = null; }
       if (e.button === 1 || (e.button === 0 && e.shiftKey)) {
         mode = "pan";
         panState = { lastX: e.clientX, lastY: e.clientY };
@@ -457,23 +474,20 @@ function render({ model, el }) {
         imgCanvas.setPointerCapture(e.pointerId);
         e.preventDefault();
       } else if (e.button === 0) {
-        // Left press: live readout + tentative zoom-box. The box only commits
-        // on release if the drag was significant; otherwise it's a no-op
-        // (and just dismisses the readout).
         const p = eventToView(e);
         mode = "zoom-box";
         zoomBox = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
         imgCanvas.setPointerCapture(e.pointerId);
-        updateReadout(e.clientX, e.clientY, p.x, p.y);
         e.preventDefault();
       }
     });
 
     imgCanvas.addEventListener("pointermove", (e) => {
+      // Always update readout regardless of mode.
+      const p = eventToView(e);
+      updateReadout(e.clientX, e.clientY, p.x, p.y);
       if (mode === "zoom-box" && zoomBox) {
-        const p = eventToView(e);
         zoomBox.x1 = p.x; zoomBox.y1 = p.y;
-        updateReadout(e.clientX, e.clientY, p.x, p.y);
         presentView();
       } else if (mode === "pan" && panState) {
         const v = view;
@@ -495,17 +509,28 @@ function render({ model, el }) {
         const dx = Math.abs(zoomBox.x1 - zoomBox.x0);
         const dy = Math.abs(zoomBox.y1 - zoomBox.y0);
         if (dx > DRAG_PX && dy > DRAG_PX) {
+          // Real drag -> commit square zoom
           const side = Math.max(dx, dy);
           const cx = (zoomBox.x0 + zoomBox.x1) / 2;
           const cy = (zoomBox.y0 + zoomBox.y1) / 2;
           v.x0 = cx - side / 2; v.x1 = cx + side / 2;
           v.y0 = cy - side / 2; v.y1 = cy + side / 2;
           clampView(v);
+        } else {
+          // No drag -> debounced click-to-center (dblclick can supersede).
+          const pos = { x: zoomBox.x0, y: zoomBox.y0 };
+          pendingClickTimer = setTimeout(() => {
+            pendingClickTimer = null;
+            const w = view.x1 - view.x0, h = view.y1 - view.y0;
+            view.x0 = pos.x - w / 2; view.x1 = pos.x + w / 2;
+            view.y0 = pos.y - h / 2; view.y1 = pos.y + h / 2;
+            clampView(view);
+            presentView();
+          }, CLICK_DEBOUNCE_MS);
         }
         zoomBox = null;
         presentView();
       }
-      hideReadout();
       mode = null;
       panState = null;
       imgBox.classList.remove(`${id}-panning`);
@@ -537,14 +562,24 @@ function render({ model, el }) {
     }
     function hideReadout() { readoutEl.style.display = "none"; }
 
-    // Double left-click: reset to full FOV.
-    imgCanvas.addEventListener("dblclick", (e) => {
-      e.preventDefault();
+    // Full reset: view, all per-frame display ranges, colormap.
+    function resetAll() {
+      if (pendingClickTimer) { clearTimeout(pendingClickTimer); pendingClickTimer = null; }
       const f = frames[frameIdx];
       view.x0 = 0; view.y0 = 0; view.x1 = f.W; view.y1 = f.H;
+      for (let i = 0; i < frames.length; i++) {
+        frameRanges[i].vmin = frames[i].mean - 1 * frames[i].std;
+        frameRanges[i].vmax = frames[i].mean + 2 * frames[i].std;
+      }
+      cmapName = "gray";
+      cmapSel.value = "gray";
       hideMeta();
-      hideReadout();
-      presentView();
+      paint();
+    }
+    // Double-click also resets everything (matches the Reset button).
+    imgCanvas.addEventListener("dblclick", (e) => {
+      e.preventDefault();
+      resetAll();
     });
 
     imgCanvas.addEventListener("wheel", (e) => {
@@ -594,12 +629,7 @@ function render({ model, el }) {
     }
     function hideMeta() { metaEl.style.display = "none"; }
 
-    resetBtn.addEventListener("click", () => {
-      const f = frames[frameIdx];
-      view.x0 = 0; view.y0 = 0; view.x1 = f.W; view.y1 = f.H;
-      hideMeta();
-      presentView();
-    });
+    resetBtn.addEventListener("click", () => { resetAll(); });
 
     // -----------------------------------------------------------
     // Histogram drag: dual-handle range (unchanged from before)
