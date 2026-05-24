@@ -57,7 +57,7 @@ jobs:
 
       - name: Quantize volume for anywidget viewers
         run: |
-          python -m pip install h5py
+          python -m pip install h5py scipy
           python scripts/prep_volume_widget_data.py
 
       - name: Build JupyterLite

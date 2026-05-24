@@ -1,9 +1,8 @@
 // interactive-volume-slicing.js
 // AnyWidget that replicates notebooks/04.interactive_volume_slicing.ipynb
-// without a kernel. Renders three orthogonal slice planes through a uint8
-// volume in a 3D scene; drag-to-orbit and scroll-to-zoom expose the volume
-// the way the matplotlib 3D contourf does, but as fast 2D-canvas affine
-// texture maps of pre-extracted slices.
+// without a kernel. Three orthogonal slice planes are rendered as textured
+// quads via WebGL, so the GPU depth buffer handles plane-vs-plane occlusion
+// correctly at the intersection lines.
 //
 // Embed via MyST:
 //
@@ -40,7 +39,7 @@ async function loadVolume(dataUrl, metaUrl) {
   const u8 = new Uint8Array(buf);
   const [D0, D1, D2] = meta.shape;
   const nx = D0, ny = D1, nz = D2;
-  // Whole-volume histogram for the display-range slider.
+  // Histogram (whole-volume) for the display-range slider.
   const nBins = 100;
   const hist = new Float32Array(nBins);
   let sum = 0, sumSq = 0;
@@ -60,23 +59,26 @@ async function loadVolume(dataUrl, metaUrl) {
 }
 
 // ============================================================
-// Slice extraction (writes uint8 slice into preallocated buffer)
+// Slice extraction. Volume is row-major (D0, D1, D2) = (X, Y, Z), so
 //   index(x, y, z) = z + nz*(y + ny*x)
+// XY plane (z fixed):  uv = (x, y),  size (nx, ny)
+// XZ plane (y fixed):  uv = (x, z),  size (nx, nz)
+// YZ plane (x fixed):  uv = (y, z),  size (ny, nz)
 // ============================================================
-function sliceXY(vol, nx, ny, nz, z0, out) {  // (nx × ny), u=x, v=y
+function sliceXY(vol, nx, ny, nz, z0, out) {
   for (let x = 0; x < nx; x++) {
     const baseX = nz * ny * x;
     for (let y = 0; y < ny; y++) out[x + nx * y] = vol[z0 + nz * y + baseX];
   }
 }
-function sliceXZ(vol, nx, ny, nz, y0, out) {  // (nx × nz), u=x, v=z
+function sliceXZ(vol, nx, ny, nz, y0, out) {
   for (let x = 0; x < nx; x++) {
     const baseX = nz * ny * x;
     const rowY = nz * y0;
     for (let z = 0; z < nz; z++) out[x + nx * z] = vol[z + rowY + baseX];
   }
 }
-function sliceYZ(vol, nx, ny, nz, x0, out) {  // (ny × nz), u=y, v=z
+function sliceYZ(vol, nx, ny, nz, x0, out) {
   const baseX = nz * ny * x0;
   for (let y = 0; y < ny; y++) {
     const rowY = nz * y;
@@ -84,22 +86,18 @@ function sliceYZ(vol, nx, ny, nz, x0, out) {  // (ny × nz), u=y, v=z
   }
 }
 
-function renderSliceToCanvas(canvas, slice, sliceW, sliceH, vmin, vmax, cmapName) {
+// Apply the current colormap + display range to a uint8 slice and write RGBA.
+// rgbaOut is a Uint8Array of length 4 * sliceW * sliceH.
+function applyColormap(slice, rgbaOut, vmin, vmax, cmapName) {
   const cmap = COLORMAPS[cmapName] || COLORMAPS.gray;
-  canvas.width = sliceW;
-  canvas.height = sliceH;
-  const ctx = canvas.getContext("2d");
-  const img = ctx.createImageData(sliceW, sliceH);
-  const px = img.data;
-  const displaySpan = vmax - vmin || 1;
+  const span = vmax - vmin || 1;
   for (let i = 0, j = 0; i < slice.length; i++, j += 4) {
-    let t = (slice[i] - vmin) / displaySpan;
+    let t = (slice[i] - vmin) / span;
     t = t < 0 ? 0 : (t > 1 ? 1 : t);
     const c = (t * 255) | 0;
     const o = c * 3;
-    px[j] = cmap[o]; px[j + 1] = cmap[o + 1]; px[j + 2] = cmap[o + 2]; px[j + 3] = 255;
+    rgbaOut[j] = cmap[o]; rgbaOut[j + 1] = cmap[o + 1]; rgbaOut[j + 2] = cmap[o + 2]; rgbaOut[j + 3] = 255;
   }
-  ctx.putImageData(img, 0, 0);
 }
 
 function renderHistogram(canvas, stats, displayVmin, displayVmax, cmapName) {
@@ -141,13 +139,45 @@ function modelGet(model, key, fallback) {
 }
 
 // ============================================================
+// Tiny matrix helpers (column-major, OpenGL style)
+// ============================================================
+function mat4Multiply(out, a, b) {
+  for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) {
+    let s = 0;
+    for (let k = 0; k < 4; k++) s += a[i + 4 * k] * b[k + 4 * j];
+    out[i + 4 * j] = s;
+  }
+  return out;
+}
+function mat4Ortho(out, l, r, b, t, n, f) {
+  out.fill(0);
+  out[0]  = 2 / (r - l);
+  out[5]  = 2 / (t - b);
+  out[10] = -2 / (f - n);
+  out[12] = -(r + l) / (r - l);
+  out[13] = -(t + b) / (t - b);
+  out[14] = -(f + n) / (f - n);
+  out[15] = 1;
+  return out;
+}
+// Build a "look at" view matrix from camera basis.
+function mat4LookAt(out, camX, camY, camZ, rightX, rightY, rightZ, upX, upY, upZ, fwdX, fwdY, fwdZ) {
+  // Camera looks DOWN -Z in view space. So row 3 = -fwd.
+  out[0] = rightX; out[4] = rightY; out[8]  = rightZ;  out[12] = -(rightX * camX + rightY * camY + rightZ * camZ);
+  out[1] = upX;    out[5] = upY;    out[9]  = upZ;     out[13] = -(upX * camX + upY * camY + upZ * camZ);
+  out[2] = -fwdX;  out[6] = -fwdY;  out[10] = -fwdZ;   out[14] = +(fwdX * camX + fwdY * camY + fwdZ * camZ);
+  out[3] = 0;      out[7] = 0;      out[11] = 0;       out[15] = 1;
+  return out;
+}
+
+// ============================================================
 // Main render
 // ============================================================
 function render({ model, el }) {
   const dataUrl = modelGet(model, "data_url", "./widgets/data/interactive_volume.bin");
   const metaUrl = modelGet(model, "meta_url", "./widgets/data/interactive_volume.json");
   const id = "ivs_" + Math.random().toString(36).slice(2, 8);
-  const CANVAS_PX = 420;  // 42 colorbar + 12 + 420 canvas + 12 + 210 controls = 696
+  const CANVAS_PX = 420;
 
   el.innerHTML = `
     <style>
@@ -173,12 +203,11 @@ function render({ model, el }) {
       .${id}-hist-values { display: flex; justify-content: space-between; font-size: 11px; font-variant-numeric: tabular-nums; color: #888; }
       .${id}-ctrl { display: flex; flex-direction: column; gap: 4px; }
       .${id}-ctrl select { padding: 3px 5px; font-size: 12px; border: 1px solid #bbb; border-radius: 4px; background: transparent; color: inherit; }
-      .${id}-ctrl-inline { display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; color: #888; }
-      .${id}-loading { padding: 20px; color: #888; font-size: 13px; }
       .${id}-slice-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #888; }
       .${id}-slice-row input[type="range"] { flex: 1; margin: 0; }
       .${id}-slice-row .${id}-slice-axis { width: 14px; font-weight: 600; color: #555; }
       .${id}-slice-row .${id}-slice-val { width: 60px; text-align: right; font-variant-numeric: tabular-nums; }
+      .${id}-loading { padding: 20px; color: #888; font-size: 13px; }
     </style>
     <div class="${id}-wrap">
       <div class="${id}-loading">Loading volume…</div>
@@ -250,7 +279,128 @@ function render({ model, el }) {
     const colorbarWrap = $(`.${id}-colorbar-wrap`);
     const resetBtn = $(`.${id}-reset`);
 
-    // --- State
+    // -----------------------------------------------------------
+    // WebGL setup
+    // -----------------------------------------------------------
+    const gl = canvas.getContext("webgl", { antialias: true, premultipliedAlpha: false }) ||
+               canvas.getContext("experimental-webgl");
+    if (!gl) {
+      wrap.innerHTML = `<div style="padding: 16px; color: #c33; font-family: monospace; font-size: 12px;">WebGL is required for the volume slicing widget but is not available in this browser.</div>`;
+      return;
+    }
+    gl.enable(gl.DEPTH_TEST);
+    gl.depthFunc(gl.LEQUAL);
+    gl.clearColor(0.97, 0.96, 0.94, 1.0);  // matches CSS canvas-box bg
+
+    function compile(src, type) {
+      const sh = gl.createShader(type);
+      gl.shaderSource(sh, src); gl.compileShader(sh);
+      if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+        throw new Error("Shader compile error: " + gl.getShaderInfoLog(sh));
+      }
+      return sh;
+    }
+    function link(vs, fs) {
+      const p = gl.createProgram();
+      gl.attachShader(p, vs); gl.attachShader(p, fs); gl.linkProgram(p);
+      if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+        throw new Error("Program link error: " + gl.getProgramInfoLog(p));
+      }
+      return p;
+    }
+    // Textured-quad program
+    const VS_TEX = `
+      attribute vec3 a_pos;
+      attribute vec2 a_uv;
+      uniform mat4 u_proj;
+      uniform mat4 u_view;
+      varying vec2 v_uv;
+      void main() {
+        gl_Position = u_proj * u_view * vec4(a_pos, 1.0);
+        v_uv = a_uv;
+      }
+    `;
+    const FS_TEX = `
+      precision mediump float;
+      varying vec2 v_uv;
+      uniform sampler2D u_tex;
+      void main() {
+        gl_FragColor = texture2D(u_tex, v_uv);
+      }
+    `;
+    const VS_LINE = `
+      attribute vec3 a_pos;
+      uniform mat4 u_proj;
+      uniform mat4 u_view;
+      void main() { gl_Position = u_proj * u_view * vec4(a_pos, 1.0); }
+    `;
+    const FS_LINE = `
+      precision mediump float;
+      uniform vec4 u_color;
+      void main() { gl_FragColor = u_color; }
+    `;
+    const progTex = link(compile(VS_TEX, gl.VERTEX_SHADER), compile(FS_TEX, gl.FRAGMENT_SHADER));
+    const progLine = link(compile(VS_LINE, gl.VERTEX_SHADER), compile(FS_LINE, gl.FRAGMENT_SHADER));
+
+    const locs = {
+      tex: {
+        pos: gl.getAttribLocation(progTex, "a_pos"),
+        uv:  gl.getAttribLocation(progTex, "a_uv"),
+        proj: gl.getUniformLocation(progTex, "u_proj"),
+        view: gl.getUniformLocation(progTex, "u_view"),
+        tex:  gl.getUniformLocation(progTex, "u_tex"),
+      },
+      line: {
+        pos: gl.getAttribLocation(progLine, "a_pos"),
+        proj: gl.getUniformLocation(progLine, "u_proj"),
+        view: gl.getUniformLocation(progLine, "u_view"),
+        color: gl.getUniformLocation(progLine, "u_color"),
+      },
+    };
+
+    // Buffers and textures for the three slice planes.
+    function makePlaneResource(sliceW, sliceH) {
+      const posBuf = gl.createBuffer();
+      const uvBuf = gl.createBuffer();
+      const idxBuf = gl.createBuffer();
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, idxBuf);
+      gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array([0, 1, 2, 0, 2, 3]), gl.STATIC_DRAW);
+      gl.bindBuffer(gl.ARRAY_BUFFER, uvBuf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([0, 0,  1, 0,  1, 1,  0, 1]), gl.STATIC_DRAW);
+      const tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      return { posBuf, uvBuf, idxBuf, tex, sliceW, sliceH, rgba: new Uint8Array(4 * sliceW * sliceH) };
+    }
+    const planeXY = makePlaneResource(nx, ny);  // slice has texel (u=x, v=y)
+    const planeXZ = makePlaneResource(nx, nz);
+    const planeYZ = makePlaneResource(ny, nz);
+
+    // Bounding-box line buffer (12 edges = 24 indices = 24 verts in a line list)
+    const M = Math.max(nx, ny, nz);
+    const hx = nx / M, hy = ny / M, hz = nz / M;
+    const boxCorners = new Float32Array([
+      -hx, -hy, -hz,  +hx, -hy, -hz,  +hx, +hy, -hz,  -hx, +hy, -hz,
+      -hx, -hy, +hz,  +hx, -hy, +hz,  +hx, +hy, +hz,  -hx, +hy, +hz,
+    ]);
+    const boxEdgeIdx = new Uint16Array([
+      0,1, 1,2, 2,3, 3,0,
+      4,5, 5,6, 6,7, 7,4,
+      0,4, 1,5, 2,6, 3,7,
+    ]);
+    const boxBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, boxBuf);
+    gl.bufferData(gl.ARRAY_BUFFER, boxCorners, gl.STATIC_DRAW);
+    const boxIdxBuf = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, boxIdxBuf);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, boxEdgeIdx, gl.STATIC_DRAW);
+
+    // -----------------------------------------------------------
+    // State
+    // -----------------------------------------------------------
     const state = {
       xi: (nx / 2) | 0, yi: (ny / 2) | 0, zi: (nz / 2) | 0,
       azimuth: Math.PI * 0.35,
@@ -261,36 +411,60 @@ function render({ model, el }) {
       vmax: Math.round(255 * 0.95),
     };
     const DEFAULTS = JSON.parse(JSON.stringify(state));
-
-    // Pre-allocated slice buffers and offscreen rasters
     const bufXY = new Uint8Array(nx * ny);
     const bufXZ = new Uint8Array(nx * nz);
     const bufYZ = new Uint8Array(ny * nz);
-    const offXY = document.createElement("canvas");
-    const offXZ = document.createElement("canvas");
-    const offYZ = document.createElement("canvas");
 
-    let offscreenKey = "";
-    function ensureOffscreen() {
-      const key = `${state.xi}|${state.yi}|${state.zi}|${state.cmapName}|${state.vmin}|${state.vmax}`;
-      if (key === offscreenKey) return;
-      sliceXY(vol, nx, ny, nz, state.zi, bufXY);
-      sliceXZ(vol, nx, ny, nz, state.yi, bufXZ);
-      sliceYZ(vol, nx, ny, nz, state.xi, bufYZ);
-      renderSliceToCanvas(offXY, bufXY, nx, ny, state.vmin, state.vmax, state.cmapName);
-      renderSliceToCanvas(offXZ, bufXZ, nx, nz, state.vmin, state.vmax, state.cmapName);
-      renderSliceToCanvas(offYZ, bufYZ, ny, nz, state.vmin, state.vmax, state.cmapName);
-      offscreenKey = key;
+    // Texture cache key — uploads only when the corresponding slice / range /
+    // colormap has changed.
+    const cachedKey = { xy: "", xz: "", yz: "" };
+    function uploadPlane(planeName, plane, sliceFn, idx) {
+      const key = `${idx}|${state.vmin}|${state.vmax}|${state.cmapName}`;
+      if (cachedKey[planeName] === key) return;
+      cachedKey[planeName] = key;
+      // Extract slice + apply colormap
+      const buf = planeName === "xy" ? bufXY : planeName === "xz" ? bufXZ : bufYZ;
+      sliceFn(vol, nx, ny, nz, idx, buf);
+      applyColormap(buf, plane.rgba, state.vmin, state.vmax, state.cmapName);
+      // Upload to GL texture
+      gl.bindTexture(gl.TEXTURE_2D, plane.tex);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.texImage2D(
+        gl.TEXTURE_2D, 0, gl.RGBA, plane.sliceW, plane.sliceH, 0,
+        gl.RGBA, gl.UNSIGNED_BYTE, plane.rgba,
+      );
     }
 
-    // --- Camera math (orthographic). Same convention as the rendering widget.
-    const maxDim = Math.max(nx, ny, nz);
-    const hx = nx / maxDim, hy = ny / maxDim, hz = nz / maxDim;
-    function projectAndDraw() {
-      const ctx = canvas.getContext("2d");
-      const W = canvas.width, H = canvas.height;
-      ctx.clearRect(0, 0, W, H);
+    // Build 4 plane corners in 3D for each slice. Corner order matches the
+    // UV order (0,0) (1,0) (1,1) (0,1).
+    function planePositions() {
+      const xw = -hx + (state.xi / Math.max(1, nx - 1)) * 2 * hx;
+      const yw = -hy + (state.yi / Math.max(1, ny - 1)) * 2 * hy;
+      const zw = -hz + (state.zi / Math.max(1, nz - 1)) * 2 * hz;
+      return {
+        xy: new Float32Array([-hx, -hy, zw,   +hx, -hy, zw,   +hx, +hy, zw,   -hx, +hy, zw]),
+        xz: new Float32Array([-hx,  yw, -hz,  +hx,  yw, -hz,  +hx,  yw, +hz,  -hx,  yw, +hz]),
+        yz: new Float32Array([ xw, -hy, -hz,  xw, +hy, -hz,  xw, +hy, +hz,  xw, -hy, +hz]),
+      };
+    }
 
+    const projMat = new Float32Array(16);
+    const viewMat = new Float32Array(16);
+
+    function paint() {
+      // Sync sliders → values
+      xValEl.textContent = `${state.xi}/${nx - 1}`;
+      yValEl.textContent = `${state.yi}/${ny - 1}`;
+      zValEl.textContent = `${state.zi}/${nz - 1}`;
+      vminVal.textContent = String(state.vmin | 0);
+      vmaxVal.textContent = String(state.vmax | 0);
+
+      // Update textures (only the plane that changed will actually re-upload)
+      uploadPlane("xy", planeXY, sliceXY, state.zi);
+      uploadPlane("xz", planeXZ, sliceXZ, state.yi);
+      uploadPlane("yz", planeYZ, sliceYZ, state.xi);
+
+      // Camera basis
       const ca = Math.cos(state.azimuth), sa = Math.sin(state.azimuth);
       const ce = Math.cos(state.elevation), se = Math.sin(state.elevation);
       const fwdX = -sa * ce, fwdY = -se, fwdZ = -ca * ce;
@@ -298,104 +472,64 @@ function render({ model, el }) {
       const upX = rightY * fwdZ - rightZ * fwdY;
       const upY = rightZ * fwdX - rightX * fwdZ;
       const upZ = rightX * fwdY - rightY * fwdX;
+      // Camera at distance D, looking at origin.
+      const camDist = 4.0;
+      const camX = -fwdX * camDist;
+      const camY = -fwdY * camDist;
+      const camZ = -fwdZ * camDist;
 
       const halfExtent = 1.4 / state.zoom;
-      const aspect = W / H;
-      // Project a world point (X, Y, Z) -> screen (sx, sy)
-      function project(X, Y, Z) {
-        const u = X * rightX + Y * rightY + Z * rightZ;
-        const v = X * upX + Y * upY + Z * upZ;
-        return [
-          ((u / (halfExtent * aspect)) + 1) * 0.5 * W,
-          (1 - ((v / halfExtent) + 1) * 0.5) * H,
-        ];
+      mat4Ortho(projMat, -halfExtent, halfExtent, -halfExtent, halfExtent, 0.1, 20);
+      mat4LookAt(viewMat, camX, camY, camZ, rightX, rightY, rightZ, upX, upY, upZ, fwdX, fwdY, fwdZ);
+
+      // Resize GL viewport to canvas pixels (account for devicePixelRatio).
+      const dpr = window.devicePixelRatio || 1;
+      const targetW = (CANVAS_PX * dpr) | 0;
+      const targetH = (CANVAS_PX * dpr) | 0;
+      if (canvas.width !== targetW || canvas.height !== targetH) {
+        canvas.width = targetW; canvas.height = targetH;
       }
+      gl.viewport(0, 0, canvas.width, canvas.height);
+      gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
-      // Slice positions in world coords. xi in [0..nx-1] -> world x in [-hx, +hx]
-      const xw = -hx + (state.xi / Math.max(1, nx - 1)) * 2 * hx;
-      const yw = -hy + (state.yi / Math.max(1, ny - 1)) * 2 * hy;
-      const zw = -hz + (state.zi / Math.max(1, nz - 1)) * 2 * hz;
+      // --- Pass 1: bounding box (drawn behind the slices via depth buffer)
+      gl.useProgram(progLine);
+      gl.uniformMatrix4fv(locs.line.proj, false, projMat);
+      gl.uniformMatrix4fv(locs.line.view, false, viewMat);
+      gl.uniform4f(locs.line.color, 0.4, 0.4, 0.4, 0.7);
+      gl.bindBuffer(gl.ARRAY_BUFFER, boxBuf);
+      gl.enableVertexAttribArray(locs.line.pos);
+      gl.vertexAttribPointer(locs.line.pos, 3, gl.FLOAT, false, 0, 0);
+      gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, boxIdxBuf);
+      gl.drawElements(gl.LINES, boxEdgeIdx.length, gl.UNSIGNED_SHORT, 0);
 
-      // For each of the three planes, define corners as a 4-element array of
-      // world points in the order TL, TR, BR, BL where TL = slice texel (0,0),
-      // TR = (W, 0), BR = (W, H), BL = (0, H). The image then warps onto a
-      // parallelogram via a 2D affine transform built from TL/TR/BL.
-      const planes = [
-        { name: "XY", off: offXY, tl: [-hx, -hy, zw], tr: [+hx, -hy, zw], bl: [-hx, +hy, zw], center: [0, 0, zw] },
-        { name: "XZ", off: offXZ, tl: [-hx,  yw, -hz], tr: [+hx,  yw, -hz], bl: [-hx,  yw, +hz], center: [0, yw, 0] },
-        { name: "YZ", off: offYZ, tl: [ xw, -hy, -hz], tr: [ xw, +hy, -hz], bl: [ xw, -hy, +hz], center: [xw, 0, 0] },
-      ];
+      // --- Pass 2: textured slice planes. Depth testing handles occlusion.
+      gl.useProgram(progTex);
+      gl.uniformMatrix4fv(locs.tex.proj, false, projMat);
+      gl.uniformMatrix4fv(locs.tex.view, false, viewMat);
+      gl.uniform1i(locs.tex.tex, 0);
+      gl.activeTexture(gl.TEXTURE0);
 
-      // Depth-sort: back to front. A point's "depth" in the camera = point · fwd.
-      // Larger fwd-projection = farther behind the origin from the camera's view
-      // (camera sits at -fwd*~r, so depth >= camera fwd-projection). Draw largest
-      // depth first.
-      for (const p of planes) {
-        const [cx, cy, cz] = p.center;
-        p.depth = cx * fwdX + cy * fwdY + cz * fwdZ;
-      }
-      planes.sort((a, b) => b.depth - a.depth);
-
-      // Draw the back faces of the volume bounding box first.
-      drawBox(ctx, project, false);
-
-      // Draw the slice planes back-to-front via affine warp.
-      for (const p of planes) {
-        const [tlx, tly] = project(...p.tl);
-        const [trx, try_] = project(...p.tr);
-        const [blx, bly] = project(...p.bl);
-        const w = p.off.width, h = p.off.height;
-        // Affine: maps (0,0)->TL, (w,0)->TR, (0,h)->BL
-        const a = (trx - tlx) / w;
-        const b = (try_ - tly) / w;
-        const c = (blx - tlx) / h;
-        const d = (bly - tly) / h;
-        ctx.save();
-        ctx.setTransform(a, b, c, d, tlx, tly);
-        ctx.drawImage(p.off, 0, 0);
-        ctx.restore();
-      }
-
-      // Draw front faces of the box on top.
-      drawBox(ctx, project, true);
+      const positions = planePositions();
+      const drawPlane = (plane, posData) => {
+        gl.bindTexture(gl.TEXTURE_2D, plane.tex);
+        gl.bindBuffer(gl.ARRAY_BUFFER, plane.posBuf);
+        gl.bufferData(gl.ARRAY_BUFFER, posData, gl.STATIC_DRAW);
+        gl.enableVertexAttribArray(locs.tex.pos);
+        gl.vertexAttribPointer(locs.tex.pos, 3, gl.FLOAT, false, 0, 0);
+        gl.bindBuffer(gl.ARRAY_BUFFER, plane.uvBuf);
+        gl.enableVertexAttribArray(locs.tex.uv);
+        gl.vertexAttribPointer(locs.tex.uv, 2, gl.FLOAT, false, 0, 0);
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, plane.idxBuf);
+        gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+      };
+      drawPlane(planeXY, positions.xy);
+      drawPlane(planeXZ, positions.xz);
+      drawPlane(planeYZ, positions.yz);
 
       angleEl.textContent = `az ${(state.azimuth * 180 / Math.PI).toFixed(0)}° · el ${(state.elevation * 180 / Math.PI).toFixed(0)}° · zoom ${state.zoom.toFixed(2)}×`;
-    }
-
-    // Box outline. We draw all 12 edges as thin lines, with the back half a bit
-    // softer so the user reads the depth ordering.
-    const cubeCorners = [
-      [-hx, -hy, -hz], [+hx, -hy, -hz], [+hx, +hy, -hz], [-hx, +hy, -hz],
-      [-hx, -hy, +hz], [+hx, -hy, +hz], [+hx, +hy, +hz], [-hx, +hy, +hz],
-    ];
-    const cubeEdges = [
-      [0,1],[1,2],[2,3],[3,0],  // back face
-      [4,5],[5,6],[6,7],[7,4],  // front face
-      [0,4],[1,5],[2,6],[3,7],  // verticals
-    ];
-    function drawBox(ctx, project, frontPass) {
-      // Compute each corner's camera-depth. For each edge, mean depth decides
-      // whether it belongs to the back-pass or the front-pass.
-      const depths = cubeCorners.map(([x, y, z]) => {
-        const ca = Math.cos(state.azimuth), sa = Math.sin(state.azimuth);
-        const ce = Math.cos(state.elevation), se = Math.sin(state.elevation);
-        return x * (-sa * ce) + y * (-se) + z * (-ca * ce);
-      });
-      const median = depths.slice().sort((a, b) => a - b)[4];  // middle of 8
-      ctx.save();
-      ctx.lineWidth = 1;
-      for (const [i, j] of cubeEdges) {
-        const edgeDepth = (depths[i] + depths[j]) / 2;
-        const isFront = edgeDepth < median;
-        if (frontPass !== isFront) continue;
-        ctx.strokeStyle = frontPass ? "rgba(80,80,80,0.85)" : "rgba(150,150,150,0.5)";
-        if (!frontPass) ctx.setLineDash([3, 3]);
-        const [x0, y0] = project(...cubeCorners[i]);
-        const [x1, y1] = project(...cubeCorners[j]);
-        ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
-        ctx.setLineDash([]);
-      }
-      ctx.restore();
+      renderHistogram(histCanvas, stats, state.vmin, state.vmax, state.cmapName);
+      renderColorbar();
     }
 
     function renderColorbar() {
@@ -423,20 +557,6 @@ function render({ model, el }) {
       }
       colorbarWrap.querySelectorAll(`.${id}-cb-tick`).forEach(n => n.remove());
       colorbarWrap.insertAdjacentHTML("beforeend", ticks.join(""));
-    }
-
-    function paint() {
-      state.vmin = Math.max(0, Math.min(state.vmin, 254));
-      state.vmax = Math.max(state.vmin + 1, Math.min(state.vmax, 255));
-      vminVal.textContent = String(state.vmin | 0);
-      vmaxVal.textContent = String(state.vmax | 0);
-      xValEl.textContent = `${state.xi}/${nx - 1}`;
-      yValEl.textContent = `${state.yi}/${ny - 1}`;
-      zValEl.textContent = `${state.zi}/${nz - 1}`;
-      ensureOffscreen();
-      projectAndDraw();
-      renderHistogram(histCanvas, stats, state.vmin, state.vmax, state.cmapName);
-      renderColorbar();
     }
 
     // -----------------------------------------------------------
@@ -469,7 +589,6 @@ function render({ model, el }) {
     };
     canvas.addEventListener("pointerup", endDrag);
     canvas.addEventListener("pointercancel", endDrag);
-
     canvas.addEventListener("wheel", (e) => {
       e.preventDefault();
       const factor = Math.exp(-e.deltaY * 0.001);
@@ -487,18 +606,12 @@ function render({ model, el }) {
     }
     canvas.addEventListener("dblclick", (e) => { e.preventDefault(); resetAll(); });
     resetBtn.addEventListener("click", resetAll);
-
-    // -----------------------------------------------------------
-    // Slice sliders
-    // -----------------------------------------------------------
     xSlider.addEventListener("input", () => { state.xi = parseInt(xSlider.value, 10); paint(); });
     ySlider.addEventListener("input", () => { state.yi = parseInt(ySlider.value, 10); paint(); });
     zSlider.addEventListener("input", () => { state.zi = parseInt(zSlider.value, 10); paint(); });
     cmapSel.addEventListener("change", () => { state.cmapName = cmapSel.value; paint(); });
 
-    // -----------------------------------------------------------
     // Histogram dual-handle drag
-    // -----------------------------------------------------------
     let histDrag = null;
     function histX(e) {
       const rect = histCanvas.getBoundingClientRect();
@@ -534,8 +647,7 @@ function render({ model, el }) {
   });
 }
 
-// Compact number formatter for colorbar ticks: 2-3 sig figs with no
-// trailing zeros, falling back to scientific for very small / large values.
+// Compact number formatter for colorbar ticks.
 function formatTickValue(v) {
   if (v === 0) return "0";
   const a = Math.abs(v);

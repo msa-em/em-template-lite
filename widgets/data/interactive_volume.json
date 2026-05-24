@@ -13,5 +13,7 @@
   "vmin_raw": 0.0,
   "vmax_raw": 0.00833955965936184,
   "mean_raw": 0.0009122262708842754,
-  "std_raw": 0.001384401461109519
+  "std_raw": 0.001384401461109519,
+  "atoms_url": "interactive_volume_atoms.bin",
+  "n_atoms": 1886
 }

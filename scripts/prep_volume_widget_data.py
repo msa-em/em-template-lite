@@ -28,6 +28,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 H5_PATH = REPO_ROOT / "notebooks" / "data" / "CNT_overlap_tomo_missing.h5"
 OUT_BIN = REPO_ROOT / "widgets" / "data" / "interactive_volume.bin"
 OUT_META = REPO_ROOT / "widgets" / "data" / "interactive_volume.json"
+OUT_ATOMS = REPO_ROOT / "widgets" / "data" / "interactive_volume_atoms.bin"
 
 
 def main() -> int:
@@ -55,6 +56,17 @@ def main() -> int:
     OUT_BIN.write_bytes(quantized.tobytes())
     print(f"[write] {OUT_BIN.relative_to(REPO_ROOT)}  {OUT_BIN.stat().st_size / 1e6:.2f} MB")
 
+    # Atom positions: same recipe as notebook 05. Local maxima above a noise
+    # floor in the normalized volume. We store as Float32 (N, 3) in source-
+    # voxel coordinates (matches the volume's pixel grid).
+    from scipy.ndimage import maximum_filter
+    normalized = (vol - vmin_raw) / max(1e-12, vmax_raw - vmin_raw)
+    is_max = (maximum_filter(normalized, size=3) == normalized) & (normalized > 3e-3)
+    atoms_xyz = np.argwhere(is_max).astype(np.float32)  # shape (N, 3)
+    OUT_ATOMS.write_bytes(atoms_xyz.tobytes())
+    n_atoms = atoms_xyz.shape[0]
+    print(f"[write] {OUT_ATOMS.relative_to(REPO_ROOT)}  {n_atoms} atom-like maxima")
+
     meta = {
         "shape": [D0, D1, D2],
         "axis_labels": ["x", "y", "z"],  # naming for the orthoview UI
@@ -63,6 +75,8 @@ def main() -> int:
         "vmax_raw": vmax_raw,
         "mean_raw": mean_raw,
         "std_raw": std_raw,
+        "atoms_url": "interactive_volume_atoms.bin",
+        "n_atoms": int(n_atoms),
     }
     OUT_META.write_text(json.dumps(meta, indent=2) + "\n")
     print(f"[write] {OUT_META.relative_to(REPO_ROOT)}")

@@ -228,13 +228,20 @@ function render({ model, el }) {
       .${id}-help-tip { display: none; position: absolute; bottom: calc(100% + 6px); right: 0; background: rgba(0,0,0,0.92); color: #fff; padding: 10px 12px; border-radius: 4px; font-size: 12px; line-height: 1.6; width: 220px; white-space: normal; pointer-events: none; }
       .${id}-help-wrap:hover .${id}-help-tip { display: block; }
       .${id}-angle-readout { position: absolute; bottom: 8px; left: 8px; color: #fff; font-size: 11px; font-family: ui-monospace, monospace; text-shadow: 0 0 3px #000, 0 0 3px #000; pointer-events: none; font-variant-numeric: tabular-nums; }
-      .${id}-controls { display: flex; flex-direction: column; gap: 12px; width: 190px; flex-shrink: 0; }
+      .${id}-controls { display: flex; flex-direction: column; gap: 12px; width: 210px; flex-shrink: 0; }
       .${id}-section-label { font-weight: 600; font-size: 11px; color: #888; letter-spacing: 0.02em; }
       .${id}-ctrl { display: flex; flex-direction: column; gap: 4px; }
       .${id}-ctrl select { padding: 3px 5px; font-size: 12px; border: 1px solid #bbb; border-radius: 4px; background: transparent; color: inherit; }
+      .${id}-ctrl-inline { display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; color: #888; }
       .${id}-slider { width: 100%; margin: 0; }
       .${id}-slider-row { display: flex; justify-content: space-between; font-size: 11px; color: #888; font-variant-numeric: tabular-nums; }
       .${id}-loading { padding: 20px; color: #888; font-size: 13px; }
+      .${id}-pb-buttons { display: flex; gap: 4px; align-items: center; }
+      .${id}-pb-btn { background: transparent; border: 1px solid #bbb; color: inherit; padding: 3px 8px; border-radius: 4px; font-size: 11px; cursor: pointer; font-family: inherit; line-height: 1.2; }
+      .${id}-pb-btn:hover { background: rgba(128,128,128,0.12); }
+      .${id}-pb-btn.${id}-active { background: rgba(60,140,80,0.18); border-color: rgb(60,140,80); color: rgb(40,110,60); }
+      .${id}-pb-play-btn { flex: 1; min-width: 0; }
+      .${id}-pb-counter { font-size: 11px; color: #888; font-variant-numeric: tabular-nums; min-width: 50px; text-align: right; }
     </style>
     <div class="${id}-wrap">
       <div class="${id}-loading">Loading volume…</div>
@@ -242,7 +249,7 @@ function render({ model, el }) {
 
   const wrap = el.querySelector(`.${id}-wrap`);
 
-  loadVolume(dataUrl, metaUrl).then(({ vol, nx, ny, nz, meta }) => {
+  loadVolume(dataUrl, metaUrl).then(async ({ vol, nx, ny, nz, meta }) => {
     wrap.innerHTML = `
       <div class="${id}-row">
         <div class="${id}-colorbar-wrap">
@@ -263,6 +270,19 @@ function render({ model, el }) {
         </div>
         <div class="${id}-controls">
           <div class="${id}-ctrl">
+            <div class="${id}-section-label">Layers</div>
+            <label class="${id}-ctrl-inline"><input class="${id}-show-volume" type="checkbox" checked/> Volume</label>
+            <label class="${id}-ctrl-inline"><input class="${id}-show-atoms" type="checkbox"/> Atom maxima ${meta.n_atoms ? `(${meta.n_atoms})` : ""}</label>
+          </div>
+          <div class="${id}-ctrl">
+            <div class="${id}-section-label">Auto-rotate</div>
+            <div class="${id}-pb-buttons">
+              <button class="${id}-pb-btn ${id}-pb-play-btn" type="button" title="Play / pause auto-rotation">▶ Play</button>
+              <span class="${id}-pb-counter ${id}-pb-fps-val">10 fps</span>
+            </div>
+            <input class="${id}-slider ${id}-fps" type="range" min="1" max="60" step="1" value="10" title="Rotation speed"/>
+          </div>
+          <div class="${id}-ctrl">
             <div class="${id}-section-label">Opacity</div>
             <input class="${id}-slider ${id}-alpha" type="range" min="0.2" max="30" step="0.2" value="5"/>
             <div class="${id}-slider-row"><span>α =</span><span class="${id}-alpha-val">5.00</span></div>
@@ -276,11 +296,6 @@ function render({ model, el }) {
             <div class="${id}-section-label">Display range (max)</div>
             <input class="${id}-slider ${id}-vmax" type="range" min="1" max="255" step="1" value="242"/>
             <div class="${id}-slider-row"><span>max =</span><span class="${id}-vmax-val">242</span></div>
-          </div>
-          <div class="${id}-ctrl">
-            <div class="${id}-section-label">Sample density</div>
-            <input class="${id}-slider ${id}-samples" type="range" min="32" max="192" step="8" value="96"/>
-            <div class="${id}-slider-row"><span>steps =</span><span class="${id}-samples-val">96</span></div>
           </div>
           <div class="${id}-ctrl">
             <div class="${id}-section-label">Colormap</div>
@@ -302,11 +317,25 @@ function render({ model, el }) {
     const vmaxSlider = $(`.${id}-vmax`);
     const vminVal = $(`.${id}-vmin-val`);
     const vmaxVal = $(`.${id}-vmax-val`);
-    const samplesSlider = $(`.${id}-samples`);
-    const samplesVal = $(`.${id}-samples-val`);
     const cmapSel = $(`.${id}-cmap`);
+    const showVolumeCk = $(`.${id}-show-volume`);
+    const showAtomsCk = $(`.${id}-show-atoms`);
+    const playBtn = $(`.${id}-pb-play-btn`);
+    const fpsSlider = $(`.${id}-fps`);
+    const fpsValEl = $(`.${id}-pb-fps-val`);
 
     const renderer = makeRenderer(vol, nx, ny, nz, canvas);
+
+    // Try to load atom-position list. Optional — if missing, the checkbox
+    // stays available but renders nothing.
+    let atoms = null;  // Float32Array of length 3N: x0,y0,z0, x1,y1,z1, ...
+    if (meta.atoms_url) {
+      try {
+        const atomsUrl = new URL(meta.atoms_url, metaUrl).href;
+        const r = await fetch(atomsUrl);
+        if (r.ok) atoms = new Float32Array(await r.arrayBuffer());
+      } catch (_) { /* keep atoms = null */ }
+    }
 
     const state = {
       azimuth: Math.PI * 0.25,
@@ -316,9 +345,16 @@ function render({ model, el }) {
       vmin: 64,
       vmax: 242,
       alpha: 5.0,
-      samples: 96,
+      showVolume: true,
+      showAtoms: false,
     };
     const DEFAULTS = JSON.parse(JSON.stringify(state));
+    // Auto-rotate state (not persisted across resets in the obvious way —
+    // resetAll stops rotation and resets fps to default).
+    const ROTATE_DEFAULTS = { playing: false, fps: 10, deg_per_frame: 1 };
+    let autoRotate = { ...ROTATE_DEFAULTS };
+    let rotateRafId = null;
+    let lastRotateTime = 0;
 
     let renderHandle = null;
     function scheduleRender(interactive) {
@@ -328,17 +364,76 @@ function render({ model, el }) {
         doRender(interactive);
       });
     }
+    // Always render at full resolution; only the sample count changes during
+    // interaction. Keeping the canvas size constant means the displayed
+    // smoothness is consistent rather than visibly mip-jumping on release.
+    const SAMPLES_HI = 96;
+    const SAMPLES_LO = 32;
     function doRender(interactive) {
-      const px = interactive ? CANVAS_PX_LO : CANVAS_PX_HI;
-      renderer.renderFrame({
-        azimuth: state.azimuth, elevation: state.elevation, zoom: state.zoom,
-        cmapName: state.cmapName, vmin: state.vmin, vmax: state.vmax,
-        alpha: state.alpha,
-        samples: interactive ? Math.max(24, (state.samples / 2) | 0) : state.samples,
-        outW: px, outH: px,
-      });
+      const ctx = canvas.getContext("2d");
+      if (state.showVolume) {
+        renderer.renderFrame({
+          azimuth: state.azimuth, elevation: state.elevation, zoom: state.zoom,
+          cmapName: state.cmapName, vmin: state.vmin, vmax: state.vmax,
+          alpha: state.alpha,
+          samples: interactive ? SAMPLES_LO : SAMPLES_HI,
+          outW: CANVAS_PX_HI, outH: CANVAS_PX_HI,
+        });
+      } else {
+        // Volume disabled: clear to dark background so atoms (if any) read clean.
+        canvas.width = CANVAS_PX_HI;
+        canvas.height = CANVAS_PX_HI;
+        ctx.fillStyle = "#000";
+        ctx.fillRect(0, 0, CANVAS_PX_HI, CANVAS_PX_HI);
+      }
+      if (state.showAtoms && atoms) drawAtoms(ctx);
       angleEl.textContent = `az ${(state.azimuth * 180 / Math.PI).toFixed(0)}° · el ${(state.elevation * 180 / Math.PI).toFixed(0)}° · zoom ${state.zoom.toFixed(2)}×`;
       renderColorbar();
+    }
+
+    function drawAtoms(ctx) {
+      // Project each (x, y, z) atom voxel coord to screen using the same camera
+      // basis as the volume renderer. Voxel coords -> world coords -> orthographic
+      // projection. Draw a small circle, sorted by depth so back atoms are
+      // overdrawn by front ones.
+      const ca = Math.cos(state.azimuth), sa = Math.sin(state.azimuth);
+      const ce = Math.cos(state.elevation), se = Math.sin(state.elevation);
+      const fwdX = -sa * ce, fwdY = -se, fwdZ = -ca * ce;
+      const rightX = ca, rightY = 0, rightZ = -sa;
+      const upX = rightY * fwdZ - rightZ * fwdY;
+      const upY = rightZ * fwdX - rightX * fwdZ;
+      const upZ = rightX * fwdY - rightY * fwdX;
+      const M = Math.max(nx, ny, nz);
+      const hx = nx / M, hy = ny / M, hz = nz / M;
+      const halfExtent = 1.4 / state.zoom;
+      const aspect = 1.0;
+      const W = canvas.width, H = canvas.height;
+      // Project + depth, then sort
+      const projected = new Array(atoms.length / 3);
+      for (let i = 0, k = 0; i < atoms.length; i += 3, k++) {
+        // Voxel -> world: ax in [0, nx-1] -> wx in [-hx, +hx]
+        const ax = atoms[i], ay = atoms[i + 1], az = atoms[i + 2];
+        const wx = -hx + (ax / Math.max(1, nx - 1)) * 2 * hx;
+        const wy = -hy + (ay / Math.max(1, ny - 1)) * 2 * hy;
+        const wz = -hz + (az / Math.max(1, nz - 1)) * 2 * hz;
+        const u = wx * rightX + wy * rightY + wz * rightZ;
+        const v = wx * upX + wy * upY + wz * upZ;
+        const d = wx * fwdX + wy * fwdY + wz * fwdZ;
+        const sx = ((u / (halfExtent * aspect)) + 1) * 0.5 * W;
+        const sy = (1 - ((v / halfExtent) + 1) * 0.5) * H;
+        projected[k] = [sx, sy, d];
+      }
+      projected.sort((a, b) => b[2] - a[2]);  // back to front
+      ctx.save();
+      ctx.fillStyle = "rgba(80,200,255,0.85)";
+      for (let i = 0; i < projected.length; i++) {
+        const [sx, sy] = projected[i];
+        if (sx < -2 || sy < -2 || sx > W + 2 || sy > H + 2) continue;
+        ctx.beginPath();
+        ctx.arc(sx, sy, 1.8, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
     }
 
     function renderColorbar() {
@@ -415,22 +510,78 @@ function render({ model, el }) {
       wheelHiResTimer = setTimeout(() => { wheelHiResTimer = null; scheduleRender(false); }, 200);
     }, { passive: false });
 
-    // Double-click + Reset = full reset
+    // Double-click + Reset = full reset (also stops auto-rotate).
     function resetAll() {
       Object.assign(state, DEFAULTS);
       alphaSlider.value = String(state.alpha);
       vminSlider.value = String(state.vmin);
       vmaxSlider.value = String(state.vmax);
-      samplesSlider.value = String(state.samples);
       cmapSel.value = state.cmapName;
+      showVolumeCk.checked = state.showVolume;
+      showAtomsCk.checked = state.showAtoms;
       alphaVal.textContent = state.alpha.toFixed(2);
       vminVal.textContent = String(state.vmin);
       vmaxVal.textContent = String(state.vmax);
-      samplesVal.textContent = String(state.samples);
+      stopAutoRotate();
+      autoRotate.fps = ROTATE_DEFAULTS.fps;
+      fpsSlider.value = String(autoRotate.fps);
+      fpsValEl.textContent = `${autoRotate.fps} fps`;
       scheduleRender(false);
     }
     canvas.addEventListener("dblclick", (e) => { e.preventDefault(); resetAll(); });
     resetBtn.addEventListener("click", () => resetAll());
+
+    // Layer checkboxes
+    showVolumeCk.addEventListener("change", () => {
+      state.showVolume = showVolumeCk.checked;
+      scheduleRender(false);
+    });
+    showAtomsCk.addEventListener("change", () => {
+      state.showAtoms = showAtomsCk.checked;
+      scheduleRender(false);
+    });
+
+    // Auto-rotate: spin around the Y axis at `fps` frames per second, each
+    // frame advancing the azimuth by deg_per_frame degrees. Renders use the
+    // interactive (low-sample) path to stay smooth at higher fps; the user's
+    // explicit interactions still get the full-quality release-render.
+    function autoTick(now) {
+      if (!autoRotate.playing) { rotateRafId = null; return; }
+      const interval = 1000 / Math.max(1, autoRotate.fps);
+      if (now - lastRotateTime >= interval) {
+        state.azimuth -= (autoRotate.deg_per_frame * Math.PI / 180);
+        lastRotateTime = now;
+        // Re-use the interactive render path; auto-rotate intentionally trades
+        // some sampling depth for smoother motion.
+        doRender(true);
+      }
+      rotateRafId = requestAnimationFrame(autoTick);
+    }
+    function startAutoRotate() {
+      if (autoRotate.playing) return;
+      autoRotate.playing = true;
+      playBtn.textContent = "⏸ Pause";
+      playBtn.classList.add(`${id}-active`);
+      lastRotateTime = performance.now();
+      rotateRafId = requestAnimationFrame(autoTick);
+    }
+    function stopAutoRotate() {
+      if (!autoRotate.playing) return;
+      autoRotate.playing = false;
+      playBtn.textContent = "▶ Play";
+      playBtn.classList.remove(`${id}-active`);
+      if (rotateRafId) { cancelAnimationFrame(rotateRafId); rotateRafId = null; }
+      // High-quality render once auto-rotate stops.
+      scheduleRender(false);
+    }
+    playBtn.addEventListener("click", () => {
+      if (autoRotate.playing) stopAutoRotate(); else startAutoRotate();
+    });
+    fpsSlider.addEventListener("input", () => {
+      autoRotate.fps = parseInt(fpsSlider.value, 10);
+      fpsValEl.textContent = `${autoRotate.fps} fps`;
+      lastRotateTime = performance.now();
+    });
 
     // Slider bindings
     alphaSlider.addEventListener("input", () => {
@@ -457,12 +608,6 @@ function render({ model, el }) {
       scheduleRender(true);
     });
     vmaxSlider.addEventListener("change", () => scheduleRender(false));
-    samplesSlider.addEventListener("input", () => {
-      state.samples = parseInt(samplesSlider.value, 10);
-      samplesVal.textContent = String(state.samples);
-      scheduleRender(true);
-    });
-    samplesSlider.addEventListener("change", () => scheduleRender(false));
     cmapSel.addEventListener("change", () => { state.cmapName = cmapSel.value; scheduleRender(false); });
 
     // Initial render

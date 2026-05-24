@@ -199,7 +199,11 @@ function render({ model, el }) {
       .${id}-meta .${id}-meta-close:hover { opacity: 1; }
       .${id}-img-box.${id}-pan-mode .${id}-img-canvas { cursor: grab; }
       .${id}-img-box.${id}-panning .${id}-img-canvas { cursor: grabbing; }
-      .${id}-readout { display: none; position: absolute; background: rgba(0,0,0,0.85); color: #fff; padding: 3px 8px; border-radius: 3px; font-size: 11px; font-family: ui-monospace, SFMono-Regular, monospace; pointer-events: none; white-space: nowrap; z-index: 11; }
+      /* Fixed-position pixel readout in the bottom-left of the image-box.
+         Updated on pointermove inside the canvas; doesn't move with the
+         cursor, so there's no edge-lingering bug. Shows last known value
+         when the cursor leaves. */
+      .${id}-readout { position: absolute; left: 8px; bottom: 8px; background: rgba(0,0,0,0.55); color: #fff; padding: 3px 8px; border-radius: 3px; font-size: 11px; font-family: ui-monospace, SFMono-Regular, monospace; pointer-events: none; white-space: nowrap; z-index: 11; }
       /* Colorbar with tick labels on the OUTSIDE edge (left of canvas).
          42 px column: ~26 px label + 4 px tick + 12 px canvas, right-aligned. */
       .${id}-colorbar-wrap { position: relative; height: 440px; width: 42px; flex-shrink: 0; }
@@ -237,7 +241,7 @@ function render({ model, el }) {
             </div>
           </div>
           <div class="${id}-meta"></div>
-          <div class="${id}-readout"></div>
+          <div class="${id}-readout">hover for pixel value</div>
         </div>
         <div class="${id}-controls">
           <div class="${id}-ctrl">
@@ -557,36 +561,20 @@ function render({ model, el }) {
     imgCanvas.addEventListener("pointercancel", endPointer);
 
     function updateReadout(clientX, clientY, viewX, viewY) {
-      // Early-out if the cursor is outside the canvas. During pointer-capture
-      // (drag), pointermove keeps firing with off-canvas coords and would
-      // otherwise re-show the readout right after pointerleave hid it.
+      // Only update when the cursor is inside the canvas. The readout is
+      // fixed in the bottom-left and stays put when the cursor leaves —
+      // no need to hide it explicitly.
       const cRect = imgCanvas.getBoundingClientRect();
       if (clientX < cRect.left || clientX > cRect.right ||
-          clientY < cRect.top  || clientY > cRect.bottom) {
-        hideReadout();
-        return;
-      }
+          clientY < cRect.top  || clientY > cRect.bottom) return;
       const f = frames[frameIdx];
       const ix = Math.max(0, Math.min(f.W - 1, Math.floor(viewX)));
       const iy = Math.max(0, Math.min(f.H - 1, Math.floor(viewY)));
-      // De-quantize stored uint16 back to a logical float.
       const u16val = f.u16[iy * f.W + ix];
       const value = f.vmin + (u16val / 65535) * (f.vmax - f.vmin);
-      const boxRect = imgBox.getBoundingClientRect();
-      const lx = clientX - boxRect.left;
-      const ly = clientY - boxRect.top;
-      // Offset so the readout isn't under the cursor. Flip sides if it would
-      // overflow the image box.
-      const offX = 14, offY = 14;
-      const RW = 130, RH = 28;  // approximate readout size for overflow checks
-      const flipX = lx + offX + RW > boxRect.width;
-      const flipY = ly + offY + RH > boxRect.height;
-      readoutEl.style.left = `${lx + (flipX ? -offX - RW : offX)}px`;
-      readoutEl.style.top  = `${ly + (flipY ? -offY - RH : offY)}px`;
       readoutEl.textContent = `(${ix}, ${iy}) = ${value.toFixed(4)}`;
-      readoutEl.style.display = "block";
     }
-    function hideReadout() { readoutEl.style.display = "none"; }
+    function hideReadout() { /* fixed-position readout — never hide */ }
 
     // Full reset: view, all per-frame display ranges, colormap.
     function resetAll() {
