@@ -1,10 +1,9 @@
 // interactive-volume-slicing.js
-// AnyWidget that replicates notebooks/04.interactive_volume_slicing.ipynb without a kernel.
-//
-// Loads a uint8 3D volume (produced by scripts/prep_volume_widget_data.py) and
-// renders three linked orthoview slice panels (XY / XZ / YZ) in an ImageJ-style
-// 2x2 grid. Clicking on any panel updates the slice positions on the others;
-// crosshairs show where each panel cuts the others.
+// AnyWidget that replicates notebooks/04.interactive_volume_slicing.ipynb
+// without a kernel. Renders three orthogonal slice planes through a uint8
+// volume in a 3D scene; drag-to-orbit and scroll-to-zoom expose the volume
+// the way the matplotlib 3D contourf does, but as fast 2D-canvas affine
+// texture maps of pre-extracted slices.
 //
 // Embed via MyST:
 //
@@ -39,21 +38,15 @@ async function loadVolume(dataUrl, metaUrl) {
   const meta = await metaRes.json();
   const buf = await binRes.arrayBuffer();
   const u8 = new Uint8Array(buf);
-  const [D0, D1, D2] = meta.shape;  // logical (x, y, z) per meta.axis_labels
-  // We treat dimension order [D0, D1, D2] = (X, Y, Z), row-major:
-  //   index = z + nz * (y + ny * x)? Actually it depends on prep order.
-  // Our prep uses np.tobytes() on shape (D0, D1, D2) which is C order:
-  //   index = i2 + D2 * (i1 + D1 * i0)
-  // So index(x=i0, y=i1, z=i2) = i2 + D2*(i1 + D1*i0).
+  const [D0, D1, D2] = meta.shape;
   const nx = D0, ny = D1, nz = D2;
-  // First-frame-style histogram over the whole volume for the display-range slider.
+  // Whole-volume histogram for the display-range slider.
   const nBins = 100;
   const hist = new Float32Array(nBins);
   let sum = 0, sumSq = 0;
   for (let i = 0; i < u8.length; i++) {
     const v = u8[i];
-    sum += v;
-    sumSq += v * v;
+    sum += v; sumSq += v * v;
     hist[Math.min(nBins - 1, (v * nBins / 256) | 0)]++;
   }
   let hmax = 0;
@@ -67,43 +60,31 @@ async function loadVolume(dataUrl, metaUrl) {
 }
 
 // ============================================================
-// Slice extraction (writes to a Uint8Array of size W*H)
+// Slice extraction (writes uint8 slice into preallocated buffer)
+//   index(x, y, z) = z + nz*(y + ny*x)
 // ============================================================
-// Volume index: index(x, y, z) = z + nz*(y + ny*x)
-//   xy plane at z = z0:    out[x + nx*y] = vol[z0 + nz*(y + ny*x)]   shape (nx, ny)
-//   xz plane at y = y0:    out[x + nx*z] = vol[z + nz*(y0 + ny*x)]   shape (nx, nz)
-//   yz plane at x = x0:    out[y + ny*z] = vol[z + nz*(y + ny*x0)]   shape (ny, nz)
-function sliceXY(vol, nx, ny, nz, z0, out) {
-  const baseZ = z0;
+function sliceXY(vol, nx, ny, nz, z0, out) {  // (nx × ny), u=x, v=y
   for (let x = 0; x < nx; x++) {
     const baseX = nz * ny * x;
-    for (let y = 0; y < ny; y++) {
-      out[x + nx * y] = vol[baseZ + nz * y + baseX];
-    }
+    for (let y = 0; y < ny; y++) out[x + nx * y] = vol[z0 + nz * y + baseX];
   }
 }
-function sliceXZ(vol, nx, ny, nz, y0, out) {
+function sliceXZ(vol, nx, ny, nz, y0, out) {  // (nx × nz), u=x, v=z
   for (let x = 0; x < nx; x++) {
     const baseX = nz * ny * x;
     const rowY = nz * y0;
-    for (let z = 0; z < nz; z++) {
-      out[x + nx * z] = vol[z + rowY + baseX];
-    }
+    for (let z = 0; z < nz; z++) out[x + nx * z] = vol[z + rowY + baseX];
   }
 }
-function sliceYZ(vol, nx, ny, nz, x0, out) {
+function sliceYZ(vol, nx, ny, nz, x0, out) {  // (ny × nz), u=y, v=z
   const baseX = nz * ny * x0;
   for (let y = 0; y < ny; y++) {
     const rowY = nz * y;
-    for (let z = 0; z < nz; z++) {
-      out[y + ny * z] = vol[z + rowY + baseX];
-    }
+    for (let z = 0; z < nz; z++) out[y + ny * z] = vol[z + rowY + baseX];
   }
 }
 
 function renderSliceToCanvas(canvas, slice, sliceW, sliceH, vmin, vmax, cmapName) {
-  // Slice is uint8 of length sliceW*sliceH (column-major to row-major above).
-  // We render at native source resolution into the canvas's internal pixels.
   const cmap = COLORMAPS[cmapName] || COLORMAPS.gray;
   canvas.width = sliceW;
   canvas.height = sliceH;
@@ -166,39 +147,38 @@ function render({ model, el }) {
   const dataUrl = modelGet(model, "data_url", "./widgets/data/interactive_volume.bin");
   const metaUrl = modelGet(model, "meta_url", "./widgets/data/interactive_volume.json");
   const id = "ivs_" + Math.random().toString(36).slice(2, 8);
-
-  // Panel size — three slice panels in a 2x2 grid, each PANEL_PX × PANEL_PX.
-  // Plus colorbar (42) + controls (200). Total row width ~= 660 px.
-  const PANEL_PX = 200;
+  const CANVAS_PX = 420;  // 42 colorbar + 12 + 420 canvas + 12 + 210 controls = 696
 
   el.innerHTML = `
     <style>
       .${id}-wrap { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #888; font-size: 13px; line-height: 1.4; }
       .${id}-row { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
-      .${id}-colorbar-wrap { position: relative; height: ${PANEL_PX * 2 + 4}px; width: 42px; flex-shrink: 0; }
+      .${id}-colorbar-wrap { position: relative; height: ${CANVAS_PX}px; width: 42px; flex-shrink: 0; }
       .${id}-colorbar-canvas { display: block; width: 12px; height: 100%; border-radius: 2px; position: absolute; right: 0; top: 0; }
       .${id}-cb-tick { position: absolute; right: 18px; font-size: 10px; color: #888; font-variant-numeric: tabular-nums; white-space: nowrap; line-height: 1; transform: translateY(-50%); text-align: right; }
       .${id}-cb-tick::before { content: ''; position: absolute; right: -5px; top: 50%; width: 4px; height: 1px; background: currentColor; }
-      .${id}-grid { display: grid; grid-template-columns: ${PANEL_PX}px ${PANEL_PX}px; grid-template-rows: ${PANEL_PX}px ${PANEL_PX}px; gap: 4px; flex-shrink: 0; }
-      .${id}-panel { position: relative; background: #000; border-radius: 4px; overflow: hidden; user-select: none; cursor: crosshair; }
-      .${id}-panel canvas { display: block; width: 100%; height: 100%; image-rendering: pixelated; }
-      .${id}-panel-label { position: absolute; top: 4px; left: 6px; color: #fff; font-size: 11px; font-weight: 600; text-shadow: 0 0 3px #000, 0 0 3px #000; pointer-events: none; }
-      .${id}-panel-axes { position: absolute; bottom: 4px; right: 6px; color: #fff; font-size: 10px; text-shadow: 0 0 3px #000, 0 0 3px #000; pointer-events: none; font-variant-numeric: tabular-nums; }
-      .${id}-info-panel { background: rgba(127,127,127,0.06); border-radius: 4px; padding: 8px 10px; font-size: 11px; line-height: 1.55; color: #888; }
-      .${id}-info-panel strong { color: #555; font-weight: 600; }
-      .${id}-controls { display: flex; flex-direction: column; gap: 12px; width: 200px; flex-shrink: 0; }
+      .${id}-canvas-box { position: relative; width: ${CANVAS_PX}px; height: ${CANVAS_PX}px; background: #f7f5f0; border-radius: 6px; flex-shrink: 0; touch-action: none; user-select: none; }
+      .${id}-canvas { display: block; width: 100%; height: 100%; cursor: grab; border-radius: 6px; }
+      .${id}-canvas-box.${id}-dragging .${id}-canvas { cursor: grabbing; }
+      .${id}-reset { position: absolute; top: 8px; right: 8px; background: rgba(0,0,0,0.55); color: #fff; border: none; padding: 4px 10px; border-radius: 4px; font-size: 12px; cursor: pointer; font-family: inherit; }
+      .${id}-reset:hover { background: rgba(0,0,0,0.75); }
+      .${id}-help-wrap { position: absolute; bottom: 8px; right: 8px; }
+      .${id}-help-btn { background: rgba(0,0,0,0.55); color: #fff; padding: 4px 10px; border-radius: 4px; font-size: 12px; cursor: help; user-select: none; }
+      .${id}-help-tip { display: none; position: absolute; bottom: calc(100% + 6px); right: 0; background: rgba(0,0,0,0.92); color: #fff; padding: 10px 12px; border-radius: 4px; font-size: 12px; line-height: 1.6; width: 220px; white-space: normal; pointer-events: none; }
+      .${id}-help-wrap:hover .${id}-help-tip { display: block; }
+      .${id}-angle-readout { position: absolute; bottom: 8px; left: 8px; color: #333; font-size: 11px; font-family: ui-monospace, monospace; pointer-events: none; font-variant-numeric: tabular-nums; background: rgba(255,255,255,0.65); padding: 2px 6px; border-radius: 3px; }
+      .${id}-controls { display: flex; flex-direction: column; gap: 12px; width: 210px; flex-shrink: 0; }
       .${id}-section-label { font-weight: 600; font-size: 11px; color: #888; letter-spacing: 0.02em; }
-      .${id}-hist-canvas { display: block; width: 200px; height: 80px; background: rgb(191,191,191); border-radius: 4px; margin: 2px 0; cursor: ew-resize; touch-action: none; }
+      .${id}-hist-canvas { display: block; width: 210px; height: 80px; background: rgb(191,191,191); border-radius: 4px; margin: 2px 0; cursor: ew-resize; touch-action: none; }
       .${id}-hist-values { display: flex; justify-content: space-between; font-size: 11px; font-variant-numeric: tabular-nums; color: #888; }
-      .${id}-ctrl { display: flex; flex-direction: column; gap: 3px; }
+      .${id}-ctrl { display: flex; flex-direction: column; gap: 4px; }
       .${id}-ctrl select { padding: 3px 5px; font-size: 12px; border: 1px solid #bbb; border-radius: 4px; background: transparent; color: inherit; }
       .${id}-ctrl-inline { display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; color: #888; }
       .${id}-loading { padding: 20px; color: #888; font-size: 13px; }
       .${id}-slice-row { display: flex; align-items: center; gap: 6px; font-size: 11px; color: #888; }
       .${id}-slice-row input[type="range"] { flex: 1; margin: 0; }
-      .${id}-slice-row .${id}-slice-axis { width: 24px; font-weight: 600; color: #444; }
-      .${id}-slice-row .${id}-slice-val { width: 50px; text-align: right; font-variant-numeric: tabular-nums; }
-      .${id}-readout { display: none; position: absolute; background: rgba(0,0,0,0.85); color: #fff; padding: 3px 8px; border-radius: 3px; font-size: 11px; font-family: ui-monospace, monospace; pointer-events: none; white-space: nowrap; z-index: 5; }
+      .${id}-slice-row .${id}-slice-axis { width: 14px; font-weight: 600; color: #555; }
+      .${id}-slice-row .${id}-slice-val { width: 60px; text-align: right; font-variant-numeric: tabular-nums; }
     </style>
     <div class="${id}-wrap">
       <div class="${id}-loading">Loading volume…</div>
@@ -214,30 +194,20 @@ function render({ model, el }) {
     wrap.innerHTML = `
       <div class="${id}-row">
         <div class="${id}-colorbar-wrap">
-          <canvas class="${id}-colorbar-canvas" width="12" height="${PANEL_PX * 2 + 4}"></canvas>
+          <canvas class="${id}-colorbar-canvas" width="12" height="${CANVAS_PX}"></canvas>
         </div>
-        <div class="${id}-grid">
-          <div class="${id}-panel ${id}-panel-xy" data-axis="z" title="XY plane (slice at fixed ${az})">
-            <canvas></canvas>
-            <div class="${id}-panel-label">${ax}–${ay} plane</div>
-            <div class="${id}-panel-axes" data-content></div>
-            <div class="${id}-readout"></div>
-          </div>
-          <div class="${id}-panel ${id}-panel-yz" data-axis="x" title="YZ plane (slice at fixed ${ax})">
-            <canvas></canvas>
-            <div class="${id}-panel-label">${ay}–${az} plane</div>
-            <div class="${id}-panel-axes" data-content></div>
-            <div class="${id}-readout"></div>
-          </div>
-          <div class="${id}-panel ${id}-panel-xz" data-axis="y" title="XZ plane (slice at fixed ${ay})">
-            <canvas></canvas>
-            <div class="${id}-panel-label">${ax}–${az} plane</div>
-            <div class="${id}-panel-axes" data-content></div>
-            <div class="${id}-readout"></div>
-          </div>
-          <div class="${id}-info-panel">
-            <strong>Volume</strong><br>${nx} × ${ny} × ${nz} voxels<br>
-            <strong>Tip</strong>: click a panel to move the slice in the other two.
+        <div class="${id}-canvas-box">
+          <canvas class="${id}-canvas" width="${CANVAS_PX}" height="${CANVAS_PX}"></canvas>
+          <button class="${id}-reset" type="button" title="Reset view, slices, range, and colormap">Reset</button>
+          <div class="${id}-angle-readout"></div>
+          <div class="${id}-help-wrap">
+            <div class="${id}-help-btn">Controls</div>
+            <div class="${id}-help-tip">
+              <strong>Left drag</strong>: orbit (azimuth + elevation)<br>
+              <strong>Wheel</strong>: zoom in / out<br>
+              <strong>Double click</strong>: reset everything<br>
+              <strong>Sliders</strong>: move the three slice planes
+            </div>
           </div>
         </div>
         <div class="${id}-controls">
@@ -249,7 +219,7 @@ function render({ model, el }) {
           </div>
           <div class="${id}-ctrl">
             <div class="${id}-section-label">Display range — drag handles</div>
-            <canvas class="${id}-hist-canvas" width="200" height="80"></canvas>
+            <canvas class="${id}-hist-canvas" width="210" height="80"></canvas>
             <div class="${id}-hist-values">
               <span>min: <span class="${id}-vmin-val"></span></span>
               <span>max: <span class="${id}-vmax-val"></span></span>
@@ -262,77 +232,174 @@ function render({ model, el }) {
         </div>
       </div>`;
 
-    const $ = (sel, root) => (root || wrap).querySelector(sel);
-
-    const xyPanel = $(`.${id}-panel-xy`);
-    const yzPanel = $(`.${id}-panel-yz`);
-    const xzPanel = $(`.${id}-panel-xz`);
-    const xyCanvas = $("canvas", xyPanel);
-    const yzCanvas = $("canvas", yzPanel);
-    const xzCanvas = $("canvas", xzPanel);
-    const xyOverlay = document.createElement("canvas"); xyPanel.insertBefore(xyOverlay, xyCanvas.nextSibling);
-    const yzOverlay = document.createElement("canvas"); yzPanel.insertBefore(yzOverlay, yzCanvas.nextSibling);
-    const xzOverlay = document.createElement("canvas"); xzPanel.insertBefore(xzOverlay, xzCanvas.nextSibling);
-    for (const o of [xyOverlay, yzOverlay, xzOverlay]) {
-      Object.assign(o.style, {
-        position: "absolute", top: 0, left: 0, width: "100%", height: "100%",
-        pointerEvents: "none", imageRendering: "auto",
-      });
-      o.width = PANEL_PX; o.height = PANEL_PX;
-    }
-    const xyReadout = $(`.${id}-readout`, xyPanel);
-    const yzReadout = $(`.${id}-readout`, yzPanel);
-    const xzReadout = $(`.${id}-readout`, xzPanel);
-
+    const $ = (sel) => wrap.querySelector(sel);
+    const canvasBox = $(`.${id}-canvas-box`);
+    const canvas = $(`.${id}-canvas`);
+    const angleEl = $(`.${id}-angle-readout`);
     const xSlider = $(`.${id}-slice-x`);
     const ySlider = $(`.${id}-slice-y`);
     const zSlider = $(`.${id}-slice-z`);
-    const xVal = $("[data-x]");
-    const yVal = $("[data-y]");
-    const zVal = $("[data-z]");
-    const xyAxes = $("[data-content]", xyPanel);
-    const yzAxes = $("[data-content]", yzPanel);
-    const xzAxes = $("[data-content]", xzPanel);
-
+    const xValEl = $("[data-x]");
+    const yValEl = $("[data-y]");
+    const zValEl = $("[data-z]");
     const histCanvas = $(`.${id}-hist-canvas`);
     const vminVal = $(`.${id}-vmin-val`);
     const vmaxVal = $(`.${id}-vmax-val`);
     const cmapSel = $(`.${id}-cmap`);
     const colorbarCanvas = $(`.${id}-colorbar-canvas`);
     const colorbarWrap = $(`.${id}-colorbar-wrap`);
+    const resetBtn = $(`.${id}-reset`);
 
-    // State: slice indices + display range + cmap. Magma matches the kernel notebook.
-    let xi = (nx / 2) | 0, yi = (ny / 2) | 0, zi = (nz / 2) | 0;
-    let cmapName = "magma";
-    // Initial display range: 25%-95% of the value span, matching the k3d demo.
-    const range = {
+    // --- State
+    const state = {
+      xi: (nx / 2) | 0, yi: (ny / 2) | 0, zi: (nz / 2) | 0,
+      azimuth: Math.PI * 0.35,
+      elevation: Math.PI * 0.18,
+      zoom: 1.0,
+      cmapName: "magma",
       vmin: Math.round(255 * 0.25),
       vmax: Math.round(255 * 0.95),
     };
-    // Pre-allocate slice buffers
+    const DEFAULTS = JSON.parse(JSON.stringify(state));
+
+    // Pre-allocated slice buffers and offscreen rasters
     const bufXY = new Uint8Array(nx * ny);
     const bufXZ = new Uint8Array(nx * nz);
     const bufYZ = new Uint8Array(ny * nz);
+    const offXY = document.createElement("canvas");
+    const offXZ = document.createElement("canvas");
+    const offYZ = document.createElement("canvas");
 
-    function drawCrosshair(overlay, hx, hy, sliceW, sliceH) {
-      const ctx = overlay.getContext("2d");
-      const W = overlay.width, H = overlay.height;
+    let offscreenKey = "";
+    function ensureOffscreen() {
+      const key = `${state.xi}|${state.yi}|${state.zi}|${state.cmapName}|${state.vmin}|${state.vmax}`;
+      if (key === offscreenKey) return;
+      sliceXY(vol, nx, ny, nz, state.zi, bufXY);
+      sliceXZ(vol, nx, ny, nz, state.yi, bufXZ);
+      sliceYZ(vol, nx, ny, nz, state.xi, bufYZ);
+      renderSliceToCanvas(offXY, bufXY, nx, ny, state.vmin, state.vmax, state.cmapName);
+      renderSliceToCanvas(offXZ, bufXZ, nx, nz, state.vmin, state.vmax, state.cmapName);
+      renderSliceToCanvas(offYZ, bufYZ, ny, nz, state.vmin, state.vmax, state.cmapName);
+      offscreenKey = key;
+    }
+
+    // --- Camera math (orthographic). Same convention as the rendering widget.
+    const maxDim = Math.max(nx, ny, nz);
+    const hx = nx / maxDim, hy = ny / maxDim, hz = nz / maxDim;
+    function projectAndDraw() {
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width, H = canvas.height;
       ctx.clearRect(0, 0, W, H);
-      // hx/hy are source-pixel coords; map to overlay pixels
-      const px = (hx / sliceW) * W;
-      const py = (hy / sliceH) * H;
-      ctx.strokeStyle = "rgba(255, 235, 50, 0.85)";
+
+      const ca = Math.cos(state.azimuth), sa = Math.sin(state.azimuth);
+      const ce = Math.cos(state.elevation), se = Math.sin(state.elevation);
+      const fwdX = -sa * ce, fwdY = -se, fwdZ = -ca * ce;
+      const rightX = ca, rightY = 0, rightZ = -sa;
+      const upX = rightY * fwdZ - rightZ * fwdY;
+      const upY = rightZ * fwdX - rightX * fwdZ;
+      const upZ = rightX * fwdY - rightY * fwdX;
+
+      const halfExtent = 1.4 / state.zoom;
+      const aspect = W / H;
+      // Project a world point (X, Y, Z) -> screen (sx, sy)
+      function project(X, Y, Z) {
+        const u = X * rightX + Y * rightY + Z * rightZ;
+        const v = X * upX + Y * upY + Z * upZ;
+        return [
+          ((u / (halfExtent * aspect)) + 1) * 0.5 * W,
+          (1 - ((v / halfExtent) + 1) * 0.5) * H,
+        ];
+      }
+
+      // Slice positions in world coords. xi in [0..nx-1] -> world x in [-hx, +hx]
+      const xw = -hx + (state.xi / Math.max(1, nx - 1)) * 2 * hx;
+      const yw = -hy + (state.yi / Math.max(1, ny - 1)) * 2 * hy;
+      const zw = -hz + (state.zi / Math.max(1, nz - 1)) * 2 * hz;
+
+      // For each of the three planes, define corners as a 4-element array of
+      // world points in the order TL, TR, BR, BL where TL = slice texel (0,0),
+      // TR = (W, 0), BR = (W, H), BL = (0, H). The image then warps onto a
+      // parallelogram via a 2D affine transform built from TL/TR/BL.
+      const planes = [
+        { name: "XY", off: offXY, tl: [-hx, -hy, zw], tr: [+hx, -hy, zw], bl: [-hx, +hy, zw], center: [0, 0, zw] },
+        { name: "XZ", off: offXZ, tl: [-hx,  yw, -hz], tr: [+hx,  yw, -hz], bl: [-hx,  yw, +hz], center: [0, yw, 0] },
+        { name: "YZ", off: offYZ, tl: [ xw, -hy, -hz], tr: [ xw, +hy, -hz], bl: [ xw, -hy, +hz], center: [xw, 0, 0] },
+      ];
+
+      // Depth-sort: back to front. A point's "depth" in the camera = point · fwd.
+      // Larger fwd-projection = farther behind the origin from the camera's view
+      // (camera sits at -fwd*~r, so depth >= camera fwd-projection). Draw largest
+      // depth first.
+      for (const p of planes) {
+        const [cx, cy, cz] = p.center;
+        p.depth = cx * fwdX + cy * fwdY + cz * fwdZ;
+      }
+      planes.sort((a, b) => b.depth - a.depth);
+
+      // Draw the back faces of the volume bounding box first.
+      drawBox(ctx, project, false);
+
+      // Draw the slice planes back-to-front via affine warp.
+      for (const p of planes) {
+        const [tlx, tly] = project(...p.tl);
+        const [trx, try_] = project(...p.tr);
+        const [blx, bly] = project(...p.bl);
+        const w = p.off.width, h = p.off.height;
+        // Affine: maps (0,0)->TL, (w,0)->TR, (0,h)->BL
+        const a = (trx - tlx) / w;
+        const b = (try_ - tly) / w;
+        const c = (blx - tlx) / h;
+        const d = (bly - tly) / h;
+        ctx.save();
+        ctx.setTransform(a, b, c, d, tlx, tly);
+        ctx.drawImage(p.off, 0, 0);
+        ctx.restore();
+      }
+
+      // Draw front faces of the box on top.
+      drawBox(ctx, project, true);
+
+      angleEl.textContent = `az ${(state.azimuth * 180 / Math.PI).toFixed(0)}° · el ${(state.elevation * 180 / Math.PI).toFixed(0)}° · zoom ${state.zoom.toFixed(2)}×`;
+    }
+
+    // Box outline. We draw all 12 edges as thin lines, with the back half a bit
+    // softer so the user reads the depth ordering.
+    const cubeCorners = [
+      [-hx, -hy, -hz], [+hx, -hy, -hz], [+hx, +hy, -hz], [-hx, +hy, -hz],
+      [-hx, -hy, +hz], [+hx, -hy, +hz], [+hx, +hy, +hz], [-hx, +hy, +hz],
+    ];
+    const cubeEdges = [
+      [0,1],[1,2],[2,3],[3,0],  // back face
+      [4,5],[5,6],[6,7],[7,4],  // front face
+      [0,4],[1,5],[2,6],[3,7],  // verticals
+    ];
+    function drawBox(ctx, project, frontPass) {
+      // Compute each corner's camera-depth. For each edge, mean depth decides
+      // whether it belongs to the back-pass or the front-pass.
+      const depths = cubeCorners.map(([x, y, z]) => {
+        const ca = Math.cos(state.azimuth), sa = Math.sin(state.azimuth);
+        const ce = Math.cos(state.elevation), se = Math.sin(state.elevation);
+        return x * (-sa * ce) + y * (-se) + z * (-ca * ce);
+      });
+      const median = depths.slice().sort((a, b) => a - b)[4];  // middle of 8
+      ctx.save();
       ctx.lineWidth = 1;
-      ctx.setLineDash([3, 3]);
-      ctx.beginPath();
-      ctx.moveTo(0, py); ctx.lineTo(W, py);
-      ctx.moveTo(px, 0); ctx.lineTo(px, H);
-      ctx.stroke();
-      ctx.setLineDash([]);
+      for (const [i, j] of cubeEdges) {
+        const edgeDepth = (depths[i] + depths[j]) / 2;
+        const isFront = edgeDepth < median;
+        if (frontPass !== isFront) continue;
+        ctx.strokeStyle = frontPass ? "rgba(80,80,80,0.85)" : "rgba(150,150,150,0.5)";
+        if (!frontPass) ctx.setLineDash([3, 3]);
+        const [x0, y0] = project(...cubeCorners[i]);
+        const [x1, y1] = project(...cubeCorners[j]);
+        ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.stroke();
+        ctx.setLineDash([]);
+      }
+      ctx.restore();
     }
 
     function renderColorbar() {
-      const cmap = COLORMAPS[cmapName] || COLORMAPS.gray;
+      const cmap = COLORMAPS[state.cmapName] || COLORMAPS.gray;
       const W = colorbarCanvas.width, H = colorbarCanvas.height;
       const ctx = colorbarCanvas.getContext("2d");
       const img = ctx.createImageData(W, H);
@@ -350,7 +417,7 @@ function render({ model, el }) {
       const ticks = [];
       for (let i = 0; i < nTicks; i++) {
         const tt = i / (nTicks - 1);
-        const u8val = range.vmax - tt * (range.vmax - range.vmin);
+        const u8val = state.vmax - tt * (state.vmax - state.vmin);
         const rawVal = meta.vmin_raw + (u8val / 255) * (meta.vmax_raw - meta.vmin_raw);
         ticks.push(`<div class="${id}-cb-tick" style="top:${tt * 100}%">${formatTickValue(rawVal)}</div>`);
       }
@@ -359,99 +426,78 @@ function render({ model, el }) {
     }
 
     function paint() {
-      range.vmin = Math.max(0, Math.min(range.vmin, 255));
-      range.vmax = Math.max(0, Math.min(range.vmax, 255));
-      if (range.vmin >= range.vmax) range.vmin = range.vmax - 1;
-      sliceXY(vol, nx, ny, nz, zi, bufXY);
-      sliceXZ(vol, nx, ny, nz, yi, bufXZ);
-      sliceYZ(vol, nx, ny, nz, xi, bufYZ);
-      renderSliceToCanvas(xyCanvas, bufXY, nx, ny, range.vmin, range.vmax, cmapName);
-      renderSliceToCanvas(xzCanvas, bufXZ, nx, nz, range.vmin, range.vmax, cmapName);
-      renderSliceToCanvas(yzCanvas, bufYZ, ny, nz, range.vmin, range.vmax, cmapName);
-      // XY plane shows X horizontal, Y vertical; crosshair = (xi, yi)
-      drawCrosshair(xyOverlay, xi, yi, nx, ny);
-      // XZ plane shows X horizontal, Z vertical; crosshair = (xi, zi)
-      drawCrosshair(xzOverlay, xi, zi, nx, nz);
-      // YZ plane shows Y horizontal, Z vertical; crosshair = (yi, zi)
-      drawCrosshair(yzOverlay, yi, zi, ny, nz);
-      xVal.textContent = `${xi}/${nx - 1}`;
-      yVal.textContent = `${yi}/${ny - 1}`;
-      zVal.textContent = `${zi}/${nz - 1}`;
-      xyAxes.textContent = `${az} = ${zi}`;
-      xzAxes.textContent = `${ay} = ${yi}`;
-      yzAxes.textContent = `${ax} = ${xi}`;
-      vminVal.textContent = String(range.vmin | 0);
-      vmaxVal.textContent = String(range.vmax | 0);
-      renderHistogram(histCanvas, stats, range.vmin, range.vmax, cmapName);
+      state.vmin = Math.max(0, Math.min(state.vmin, 254));
+      state.vmax = Math.max(state.vmin + 1, Math.min(state.vmax, 255));
+      vminVal.textContent = String(state.vmin | 0);
+      vmaxVal.textContent = String(state.vmax | 0);
+      xValEl.textContent = `${state.xi}/${nx - 1}`;
+      yValEl.textContent = `${state.yi}/${ny - 1}`;
+      zValEl.textContent = `${state.zi}/${nz - 1}`;
+      ensureOffscreen();
+      projectAndDraw();
+      renderHistogram(histCanvas, stats, state.vmin, state.vmax, state.cmapName);
       renderColorbar();
     }
 
     // -----------------------------------------------------------
-    // Panel click: set the OTHER two slice indices.
-    // For each panel, what does (cx, cy) correspond to?
-    //   xy panel (z fixed): cx -> xi, cy -> yi  (changes x, y; z stays)
-    //   yz panel (x fixed): cx -> yi, cy -> zi  (changes y, z; x stays)
-    //   xz panel (y fixed): cx -> xi, cy -> zi  (changes x, z; y stays)
-    function bindPanel(panel, canvas, readout, sliceW, sliceH, setXY) {
-      function fromEvent(e) {
-        const rect = canvas.getBoundingClientRect();
-        const px = (e.clientX - rect.left) / rect.width;
-        const py = (e.clientY - rect.top) / rect.height;
-        return {
-          sx: Math.max(0, Math.min(sliceW - 1, (px * sliceW) | 0)),
-          sy: Math.max(0, Math.min(sliceH - 1, (py * sliceH) | 0)),
-          rect,
-        };
-      }
-      let dragging = false;
-      panel.addEventListener("pointerdown", (e) => {
-        dragging = true;
-        canvas.setPointerCapture && canvas.setPointerCapture(e.pointerId);
-        const { sx, sy } = fromEvent(e);
-        setXY(sx, sy);
-        paint();
-      });
-      panel.addEventListener("pointermove", (e) => {
-        const { sx, sy, rect } = fromEvent(e);
-        // Always show a readout, like the image widget
-        const idx = currentVolumeIndex(panel, sx, sy);
-        const raw = meta.vmin_raw + (vol[idx] / 255) * (meta.vmax_raw - meta.vmin_raw);
-        readout.style.display = "block";
-        readout.style.left = `${e.clientX - rect.left + 8}px`;
-        readout.style.top = `${e.clientY - rect.top + 8}px`;
-        readout.textContent = `${formatCoord(panel, sx, sy)} = ${raw.toExponential(2)}`;
-        if (dragging) { setXY(sx, sy); paint(); }
-      });
-      panel.addEventListener("pointerleave", () => { readout.style.display = "none"; });
-      panel.addEventListener("pointerup", () => { dragging = false; });
-      panel.addEventListener("pointercancel", () => { dragging = false; });
-    }
-    function currentVolumeIndex(panel, sx, sy) {
-      // Map panel (sx, sy) plus the fixed other axis into the source volume index.
-      // index(x, y, z) = z + nz*(y + ny*x)
-      if (panel === xyPanel) return zi + nz * (sy + ny * sx);     // sx=x, sy=y
-      if (panel === xzPanel) return sy + nz * (yi + ny * sx);     // sx=x, sy=z
-      if (panel === yzPanel) return sy + nz * (sx + ny * xi);     // sx=y, sy=z
-      return 0;
-    }
-    function formatCoord(panel, sx, sy) {
-      if (panel === xyPanel) return `(${ax}=${sx}, ${ay}=${sy}, ${az}=${zi})`;
-      if (panel === xzPanel) return `(${ax}=${sx}, ${ay}=${yi}, ${az}=${sy})`;
-      if (panel === yzPanel) return `(${ax}=${xi}, ${ay}=${sx}, ${az}=${sy})`;
-      return "";
-    }
+    // Drag to orbit; wheel to zoom
+    // -----------------------------------------------------------
+    let dragState = null;
+    canvas.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      dragState = { lastX: e.clientX, lastY: e.clientY };
+      canvasBox.classList.add(`${id}-dragging`);
+      canvas.setPointerCapture(e.pointerId);
+      e.preventDefault();
+    });
+    canvas.addEventListener("pointermove", (e) => {
+      if (!dragState) return;
+      const dx = e.clientX - dragState.lastX;
+      const dy = e.clientY - dragState.lastY;
+      dragState.lastX = e.clientX;
+      dragState.lastY = e.clientY;
+      state.azimuth   -= dx * 0.01;
+      state.elevation += dy * 0.01;
+      state.elevation = Math.max(-1.4, Math.min(1.4, state.elevation));
+      paint();
+    });
+    const endDrag = (e) => {
+      if (!dragState) return;
+      dragState = null;
+      canvasBox.classList.remove(`${id}-dragging`);
+      try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
+    };
+    canvas.addEventListener("pointerup", endDrag);
+    canvas.addEventListener("pointercancel", endDrag);
 
-    bindPanel(xyPanel, xyCanvas, xyReadout, nx, ny, (sx, sy) => { xi = sx; yi = sy; xSlider.value = String(xi); ySlider.value = String(yi); });
-    bindPanel(xzPanel, xzCanvas, xzReadout, nx, nz, (sx, sy) => { xi = sx; zi = sy; xSlider.value = String(xi); zSlider.value = String(zi); });
-    bindPanel(yzPanel, yzCanvas, yzReadout, ny, nz, (sx, sy) => { yi = sx; zi = sy; ySlider.value = String(yi); zSlider.value = String(zi); });
+    canvas.addEventListener("wheel", (e) => {
+      e.preventDefault();
+      const factor = Math.exp(-e.deltaY * 0.001);
+      state.zoom = Math.max(0.4, Math.min(4.0, state.zoom * factor));
+      paint();
+    }, { passive: false });
 
-    xSlider.addEventListener("input", () => { xi = parseInt(xSlider.value, 10); paint(); });
-    ySlider.addEventListener("input", () => { yi = parseInt(ySlider.value, 10); paint(); });
-    zSlider.addEventListener("input", () => { zi = parseInt(zSlider.value, 10); paint(); });
-    cmapSel.addEventListener("change", () => { cmapName = cmapSel.value; paint(); });
+    function resetAll() {
+      Object.assign(state, DEFAULTS);
+      xSlider.value = String(state.xi);
+      ySlider.value = String(state.yi);
+      zSlider.value = String(state.zi);
+      cmapSel.value = state.cmapName;
+      paint();
+    }
+    canvas.addEventListener("dblclick", (e) => { e.preventDefault(); resetAll(); });
+    resetBtn.addEventListener("click", resetAll);
 
     // -----------------------------------------------------------
-    // Histogram drag (single shared range)
+    // Slice sliders
+    // -----------------------------------------------------------
+    xSlider.addEventListener("input", () => { state.xi = parseInt(xSlider.value, 10); paint(); });
+    ySlider.addEventListener("input", () => { state.yi = parseInt(ySlider.value, 10); paint(); });
+    zSlider.addEventListener("input", () => { state.zi = parseInt(zSlider.value, 10); paint(); });
+    cmapSel.addEventListener("change", () => { state.cmapName = cmapSel.value; paint(); });
+
+    // -----------------------------------------------------------
+    // Histogram dual-handle drag
     // -----------------------------------------------------------
     let histDrag = null;
     function histX(e) {
@@ -465,21 +511,20 @@ function render({ model, el }) {
     histCanvas.addEventListener("pointerdown", (e) => {
       e.preventDefault();
       const x = histX(e);
-      const r = range;
-      const xMinDist = Math.abs(x - ((r.vmin - stats.vmin) / (stats.vmax - stats.vmin)) * histCanvas.width);
-      const xMaxDist = Math.abs(x - ((r.vmax - stats.vmin) / (stats.vmax - stats.vmin)) * histCanvas.width);
+      const xMinDist = Math.abs(x - ((state.vmin - stats.vmin) / (stats.vmax - stats.vmin)) * histCanvas.width);
+      const xMaxDist = Math.abs(x - ((state.vmax - stats.vmin) / (stats.vmax - stats.vmin)) * histCanvas.width);
       histDrag = xMinDist <= xMaxDist ? "vmin" : "vmax";
       histCanvas.setPointerCapture(e.pointerId);
       applyHistDrag(x);
     });
     histCanvas.addEventListener("pointermove", (e) => { if (histDrag) applyHistDrag(histX(e)); });
-    function endHistDrag(e) { if (histDrag) { histDrag = null; try { histCanvas.releasePointerCapture(e.pointerId); } catch (_) {} } }
+    const endHistDrag = (e) => { if (histDrag) { histDrag = null; try { histCanvas.releasePointerCapture(e.pointerId); } catch (_) {} } };
     histCanvas.addEventListener("pointerup", endHistDrag);
     histCanvas.addEventListener("pointercancel", endHistDrag);
     function applyHistDrag(x) {
       const v = histValue(x);
-      if (histDrag === "vmin") range.vmin = Math.min(v, range.vmax - 1);
-      else if (histDrag === "vmax") range.vmax = Math.max(v, range.vmin + 1);
+      if (histDrag === "vmin") state.vmin = Math.min(v, state.vmax - 1);
+      else if (histDrag === "vmax") state.vmax = Math.max(v, state.vmin + 1);
       paint();
     }
 
@@ -488,7 +533,6 @@ function render({ model, el }) {
     wrap.innerHTML = `<div style="padding: 16px; color: #c33; font-family: monospace; font-size: 12px;">Failed to load volume data:<br>${err.message}</div>`;
   });
 }
-
 
 // Compact number formatter for colorbar ticks: 2-3 sig figs with no
 // trailing zeros, falling back to scientific for very small / large values.

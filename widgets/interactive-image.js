@@ -557,6 +557,15 @@ function render({ model, el }) {
     imgCanvas.addEventListener("pointercancel", endPointer);
 
     function updateReadout(clientX, clientY, viewX, viewY) {
+      // Early-out if the cursor is outside the canvas. During pointer-capture
+      // (drag), pointermove keeps firing with off-canvas coords and would
+      // otherwise re-show the readout right after pointerleave hid it.
+      const cRect = imgCanvas.getBoundingClientRect();
+      if (clientX < cRect.left || clientX > cRect.right ||
+          clientY < cRect.top  || clientY > cRect.bottom) {
+        hideReadout();
+        return;
+      }
       const f = frames[frameIdx];
       const ix = Math.max(0, Math.min(f.W - 1, Math.floor(viewX)));
       const iy = Math.max(0, Math.min(f.H - 1, Math.floor(viewY)));

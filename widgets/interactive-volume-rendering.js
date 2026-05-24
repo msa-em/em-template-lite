@@ -174,7 +174,9 @@ function makeRenderer(vol, nx, ny, nz, displayCanvas) {
           if (nv > 1) nv = 1;
           // Sample alpha proportional to value, scaled by user-controlled alpha.
           // 1 - (1-a)^ds adjusts for varying step size when zoom changes.
-          let alphaSample = 1 - Math.pow(1 - nv * 0.05 * alphaScale, ds * samples * 0.5);
+          // Beer-Lambert absorption: density ~ nv * alphaScale; the *10 baseline
+          // makes α=1 give sensible visibility for sparse tomography data.
+          const alphaSample = 1 - Math.exp(-nv * alphaScale * 10 * ds);
           if (alphaSample <= 0) continue;
           const ci = (nv * 255) | 0;
           const o = ci * 3;
@@ -262,8 +264,8 @@ function render({ model, el }) {
         <div class="${id}-controls">
           <div class="${id}-ctrl">
             <div class="${id}-section-label">Opacity</div>
-            <input class="${id}-slider ${id}-alpha" type="range" min="0.05" max="3" step="0.05" value="1"/>
-            <div class="${id}-slider-row"><span>α =</span><span class="${id}-alpha-val">1.00</span></div>
+            <input class="${id}-slider ${id}-alpha" type="range" min="0.2" max="30" step="0.2" value="5"/>
+            <div class="${id}-slider-row"><span>α =</span><span class="${id}-alpha-val">5.00</span></div>
           </div>
           <div class="${id}-ctrl">
             <div class="${id}-section-label">Display range (min)</div>
@@ -313,7 +315,7 @@ function render({ model, el }) {
       cmapName: "magma",
       vmin: 64,
       vmax: 242,
-      alpha: 1.0,
+      alpha: 5.0,
       samples: 96,
     };
     const DEFAULTS = JSON.parse(JSON.stringify(state));

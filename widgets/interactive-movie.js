@@ -580,10 +580,16 @@ function render({ model, el }) {
     imgCanvas.addEventListener("pointercancel", endPointer);
 
     function updateReadout(clientX, clientY, viewX, viewY) {
+      const cRect = imgCanvas.getBoundingClientRect();
+      if (clientX < cRect.left || clientX > cRect.right ||
+          clientY < cRect.top  || clientY > cRect.bottom) {
+        hideReadout();
+        return;
+      }
       const f = frames[frameIdx];
       const ix = Math.max(0, Math.min(f.W - 1, Math.floor(viewX)));
       const iy = Math.max(0, Math.min(f.H - 1, Math.floor(viewY)));
-      const value = f.u8[iy * f.W + ix];  // uint8 pixel value
+      const value = f.u8[iy * f.W + ix];
       const boxRect = imgBox.getBoundingClientRect();
       const lx = clientX - boxRect.left;
       const ly = clientY - boxRect.top;
