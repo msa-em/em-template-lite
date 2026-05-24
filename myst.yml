@@ -112,7 +112,7 @@ site:
     # The text rendered next to the (omitted) logo in the upper-left.
     # Coloring is done in style.css.
     logo_text: Elemental Microscopy
-    logo_url: /
+    logo_url: https://www.elementalmicroscopy.org/
     # Show only top-level entries by default in the right-hand outline.
     outline_maxdepth: 2
     # Hide the global search bar in the top nav.
