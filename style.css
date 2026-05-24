@@ -83,6 +83,33 @@ article .myst-bibliography a {
 /* External-link icon next to off-site links — keep it red too. */
 article .link .link-icon { color: rgb(191, 0, 63); }
 
+/* ---------- Other places book-theme still uses Tailwind blue ----------
+   Tab-set active tab, sidebar/TOC active page indicator, and the
+   code-block copy icon. Same red as the article links. */
+.myst-tab-item-header-active {
+  color: rgb(191, 0, 63) !important;
+  border-bottom-color: rgb(191, 0, 63) !important;
+}
+.myst-toc-item.active,
+.myst-toc-item-exact {
+  background-color: rgba(191, 0, 63, 0.15) !important;
+}
+.myst-toc-item:focus,
+.myst-toc-item:focus-visible {
+  outline-color: rgba(191, 0, 63, 0.5) !important;
+}
+.myst-code-copy-icon {
+  color: rgb(191, 0, 63) !important;
+}
+.myst-code-copy-icon:hover { color: rgb(150, 0, 50) !important; }
+
+/* ---------- Inline code spans — pink to distinguish from links ----------
+   Targets `<code>` that is NOT inside a `<pre>` (i.e., inline only,
+   not whole code blocks). Examples: `myst.yml`, `index.md`. */
+:not(pre) > code {
+  color: rgb(255, 0, 127);
+}
+
 /* ---------- Hide journal/authors/date strip site-wide ----------
    The landing now matches the other pages — the "Elemental Microscopy"
    banner, license / download / edit / github icons, and the date row
