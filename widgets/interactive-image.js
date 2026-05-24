@@ -223,11 +223,10 @@ function render({ model, el }) {
             <div class="${id}-help-btn">Controls</div>
             <div class="${id}-help-tip">
               <strong>Left drag</strong>: zoom to box (square)<br>
-              <strong>Double click</strong>: zoom out 2×<br>
+              <strong>Double click</strong>: reset to full view<br>
               <strong>Middle drag</strong> or <kbd>Shift</kbd>+drag: pan<br>
               <strong>Wheel</strong>: zoom in / out<br>
-              <strong>Right click</strong>: image metadata<br>
-              <strong>Reset</strong>: restore full view
+              <strong>Right click</strong>: image metadata
             </div>
           </div>
           <div class="${id}-meta"></div>
@@ -332,13 +331,31 @@ function render({ model, el }) {
     }
 
     function updateScaleBar() {
-      const f = frames[frameIdx];
       const v = view;
-      const sbLenSrcPx = meta.scalebar_length_nm / meta.pixel_size_nm;
-      const viewW = v.x1 - v.x0;
-      const sbLenDispPx = (sbLenSrcPx / viewW) * imgCanvas.clientWidth;
-      scalebarEl.style.width = `${sbLenDispPx}px`;
-      scalebarLabel.textContent = `${meta.scalebar_length_nm} nm`;
+      const viewWidthNm = (v.x1 - v.x0) * meta.pixel_size_nm;
+      // Pick a "nice" 1/2/5 × 10ⁿ length close to ~15% of the visible width.
+      // Mirrors how matplotlib picks axis tick spacings.
+      const target = viewWidthNm * 0.15;
+      const exponent = Math.floor(Math.log10(target));
+      const mantissa = target / Math.pow(10, exponent);
+      let niceMantissa;
+      if (mantissa < 1.5)      niceMantissa = 1;
+      else if (mantissa < 3.5) niceMantissa = 2;
+      else if (mantissa < 7.5) niceMantissa = 5;
+      else                     niceMantissa = 10;
+      const lenNm = niceMantissa * Math.pow(10, exponent);
+      const lenSrcPx = lenNm / meta.pixel_size_nm;
+      const lenDispPx = (lenSrcPx / (v.x1 - v.x0)) * imgCanvas.clientWidth;
+      scalebarEl.style.width = `${lenDispPx}px`;
+      scalebarLabel.textContent = formatNmLength(lenNm);
+    }
+
+    function formatNmLength(v) {
+      if (v >= 1)     return `${v.toFixed(0)} nm`;
+      if (v >= 0.1)   return `${v.toFixed(1)} nm`;
+      if (v >= 0.01)  return `${v.toFixed(2)} nm`;
+      if (v >= 0.001) return `${v.toFixed(3)} nm`;
+      return `${v.toExponential(0)} nm`;
     }
 
     function paint() {
@@ -485,19 +502,12 @@ function render({ model, el }) {
     imgCanvas.addEventListener("pointerup", endPointer);
     imgCanvas.addEventListener("pointercancel", endPointer);
 
-    // Double left-click: zoom out 2x, centered on click. Stops at full FOV.
+    // Double left-click: reset to full FOV.
     imgCanvas.addEventListener("dblclick", (e) => {
       e.preventDefault();
       const f = frames[frameIdx];
-      const v = view;
-      const p = eventToView(e);
-      const sw = v.x1 - v.x0;
-      const newSide = Math.min(sw * 2, Math.min(f.W, f.H));  // keep square + clamp
-      v.x0 = p.x - (p.x - v.x0) * (newSide / sw);
-      v.y0 = p.y - (p.y - v.y0) * (newSide / sw);
-      v.x1 = v.x0 + newSide;
-      v.y1 = v.y0 + newSide;
-      clampView(v);
+      view.x0 = 0; view.y0 = 0; view.x1 = f.W; view.y1 = f.H;
+      hideMeta();
       presentView();
     });
 
