@@ -55,6 +55,11 @@ jobs:
       - name: Decode movie for anywidget viewer
         run: python scripts/prep_movie_widget_data.py
 
+      - name: Quantize volume for anywidget viewers
+        run: |
+          python -m pip install h5py
+          python scripts/prep_volume_widget_data.py
+
       - name: Build JupyterLite
         run: |
           jupyter lite build \

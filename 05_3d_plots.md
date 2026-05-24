@@ -38,3 +38,32 @@ Reproduced from{cite:p}`varnavides2024iterative`.
 
 :::::
 
+## 3D plots without compute
+
+The kernel-backed widgets above use matplotlib (slicing) and k3d (volume rendering). The same data can be explored in pure JavaScript: [](#fig_volume_slicing_anywidget) shows an ImageJ-style orthoview where clicking any panel moves the slice positions of the other two, and [](#fig_volume_rendering_anywidget) ray-casts the volume directly in the browser canvas with drag-to-orbit and wheel-to-zoom.
+
+::::{figure}
+:name: fig_volume_slicing_anywidget
+
+:::{anywidget} ./widgets/interactive-volume-slicing.js
+{
+  "data_url": "../widgets/data/interactive_volume.bin",
+  "meta_url": "../widgets/data/interactive_volume.json"
+}
+:::
+
+Same reconstruction as [](#fig_volume_slicing), shown as three linked orthogonal slices. Click any panel to set the crosshair, drag a slice slider for fine control, or drag the histogram handles to tighten the display range.
+::::
+
+::::{figure}
+:name: fig_volume_rendering_anywidget
+
+:::{anywidget} ./widgets/interactive-volume-rendering.js
+{
+  "data_url": "../widgets/data/interactive_volume.bin",
+  "meta_url": "../widgets/data/interactive_volume.json"
+}
+:::
+
+Same reconstruction as [](#fig_volume_rendering), rendered by JS-canvas ray-casting with front-to-back alpha compositing. Drag to orbit, scroll to zoom, double-click to reset. While dragging, the resolution drops to keep the framerate up; releasing snaps back to full-quality.
+::::
