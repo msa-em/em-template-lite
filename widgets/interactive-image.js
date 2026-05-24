@@ -170,17 +170,18 @@ function render({ model, el }) {
       /* Labels use a medium gray that reads well on both light and dark
          backgrounds; section headers go a bit darker so they stand out. */
       .${id}-wrap { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #888; font-size: 13px; line-height: 1.4; }
-      .${id}-row { display: flex; gap: 18px; align-items: flex-start; flex-wrap: wrap; }
-      .${id}-img-box { position: relative; background: #fff; border-radius: 6px; width: 480px; height: 480px; touch-action: none; user-select: none; }
+      /* Sized to fit a ~700 px article column: 440 + 12 + 42 + 12 + 190 = 696 */
+      .${id}-row { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+      .${id}-img-box { position: relative; background: #fff; border-radius: 6px; width: 440px; height: 440px; touch-action: none; user-select: none; flex-shrink: 0; }
       .${id}-img-canvas { display: block; width: 100%; height: 100%; image-rendering: pixelated; cursor: crosshair; border-radius: 6px; }
-      .${id}-controls { display: flex; flex-direction: column; gap: 14px; min-width: 220px; }
-      .${id}-section-label { font-weight: 600; font-size: 12px; color: #888; letter-spacing: 0.02em; }
-      .${id}-hist-canvas { display: block; width: 220px; height: 90px; background: rgb(191,191,191); border-radius: 4px; margin: 4px 0; cursor: ew-resize; touch-action: none; }
-      .${id}-hist-values { display: flex; justify-content: space-between; font-size: 12px; font-variant-numeric: tabular-nums; color: #888; }
+      .${id}-controls { display: flex; flex-direction: column; gap: 12px; width: 190px; flex-shrink: 0; }
+      .${id}-section-label { font-weight: 600; font-size: 11px; color: #888; letter-spacing: 0.02em; }
+      .${id}-hist-canvas { display: block; width: 190px; height: 80px; background: rgb(191,191,191); border-radius: 4px; margin: 2px 0; cursor: ew-resize; touch-action: none; }
+      .${id}-hist-values { display: flex; justify-content: space-between; font-size: 11px; font-variant-numeric: tabular-nums; color: #888; }
       .${id}-hist-values .${id}-val { color: currentColor; font-weight: 500; }
-      .${id}-ctrl { display: flex; flex-direction: column; gap: 4px; }
-      .${id}-ctrl select { padding: 4px 6px; font-size: 13px; border: 1px solid #bbb; border-radius: 4px; background: transparent; color: inherit; }
-      .${id}-ctrl-inline { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; color: #888; }
+      .${id}-ctrl { display: flex; flex-direction: column; gap: 3px; }
+      .${id}-ctrl select { padding: 3px 5px; font-size: 12px; border: 1px solid #bbb; border-radius: 4px; background: transparent; color: inherit; }
+      .${id}-ctrl-inline { display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; color: #888; }
       .${id}-loading { padding: 20px; color: #888; font-size: 13px; }
       .${id}-scalebar { position: absolute; left: 5%; bottom: 7%; height: 5px; background: #fff; box-shadow: 0 0 2px rgba(0,0,0,0.6); border-radius: 1px; pointer-events: none; }
       .${id}-scalebar-label { position: absolute; left: 5%; bottom: calc(7% + 9px); color: #fff; text-shadow: 0 0 3px #000, 0 0 3px #000; font-size: 12px; font-weight: 600; pointer-events: none; }
@@ -198,10 +199,10 @@ function render({ model, el }) {
       .${id}-meta .${id}-meta-close:hover { opacity: 1; }
       .${id}-img-box.${id}-pan-mode .${id}-img-canvas { cursor: grab; }
       .${id}-img-box.${id}-panning .${id}-img-canvas { cursor: grabbing; }
-      /* Colorbar */
-      .${id}-colorbar-wrap { position: relative; height: 480px; width: 60px; padding-left: 4px; padding-right: 40px; box-sizing: content-box; }
-      .${id}-colorbar-canvas { display: block; width: 14px; height: 100%; border-radius: 2px; }
-      .${id}-cb-tick { position: absolute; left: 22px; font-size: 11px; color: #888; font-variant-numeric: tabular-nums; white-space: nowrap; line-height: 1; transform: translateY(-50%); }
+      /* Colorbar: 12 canvas + 4 gap + ~26 numeric label = 42 px column */
+      .${id}-colorbar-wrap { position: relative; height: 440px; width: 42px; flex-shrink: 0; }
+      .${id}-colorbar-canvas { display: block; width: 12px; height: 100%; border-radius: 2px; }
+      .${id}-cb-tick { position: absolute; left: 18px; font-size: 10px; color: #888; font-variant-numeric: tabular-nums; white-space: nowrap; line-height: 1; transform: translateY(-50%); }
       .${id}-cb-tick::before { content: ''; position: absolute; left: -5px; top: 50%; width: 4px; height: 1px; background: currentColor; }
     </style>
     <div class="${id}-wrap">
@@ -214,7 +215,7 @@ function render({ model, el }) {
     wrap.innerHTML = `
       <div class="${id}-row">
         <div class="${id}-img-box">
-          <canvas class="${id}-img-canvas" width="480" height="480"></canvas>
+          <canvas class="${id}-img-canvas" width="440" height="440"></canvas>
           <div class="${id}-scalebar"></div>
           <div class="${id}-scalebar-label"></div>
           <button class="${id}-reset" type="button" title="Reset view to full image">Reset</button>
@@ -232,12 +233,12 @@ function render({ model, el }) {
           <div class="${id}-meta"></div>
         </div>
         <div class="${id}-colorbar-wrap">
-          <canvas class="${id}-colorbar-canvas" width="14" height="480"></canvas>
+          <canvas class="${id}-colorbar-canvas" width="12" height="440"></canvas>
         </div>
         <div class="${id}-controls">
           <div class="${id}-ctrl">
             <div class="${id}-section-label">Display range — drag handles</div>
-            <canvas class="${id}-hist-canvas" width="220" height="90"></canvas>
+            <canvas class="${id}-hist-canvas" width="190" height="80"></canvas>
             <div class="${id}-hist-values">
               <span>min: <span class="${id}-val ${id}-vmin-val"></span></span>
               <span>max: <span class="${id}-val ${id}-vmax-val"></span></span>
@@ -276,15 +277,15 @@ function render({ model, el }) {
     let frameIdx = 0;
     let cmapName = "gray";
 
-    // Per-frame display ranges and viewports. The viewport (`view`) is a
-    // rectangle in *source pixel* coordinates that the display canvas crops
-    // to. Initial = full image. Both are persisted across frame switches so
-    // toggling phase/amplitude doesn't reset what the reader was looking at.
+    // Per-frame display ranges (different physical units across phase vs
+    // amplitude, so each frame remembers its own [vmin, vmax]).
     const frameRanges = frames.map((f) => ({
       vmin: f.mean - 1 * f.std,
       vmax: f.mean + 2 * f.std,
     }));
-    const frameViews = frames.map((f) => ({ x0: 0, y0: 0, x1: f.W, y1: f.H }));
+    // Single SHARED viewport across frames — toggling frames keeps the same
+    // zoom/pan so phase vs amplitude can be compared at the same location.
+    const view = { x0: 0, y0: 0, x1: frames[0].W, y1: frames[0].H };
 
     // Offscreen canvas with the full-resolution colormapped image. Recomputed
     // when frame / cmap / vmin / vmax change. Pan/zoom is then a cheap
@@ -302,7 +303,7 @@ function render({ model, el }) {
     }
 
     function presentView() {
-      const v = frameViews[frameIdx];
+      const v = view;
       const ctx = imgCanvas.getContext("2d");
       const dw = imgCanvas.width, dh = imgCanvas.height;
       ctx.imageSmoothingEnabled = false;
@@ -314,7 +315,7 @@ function render({ model, el }) {
 
     function drawZoomBox(ctx) {
       if (!zoomBox) return;
-      const v = frameViews[frameIdx];
+      const v = view;
       const dw = imgCanvas.width, dh = imgCanvas.height;
       const sw = v.x1 - v.x0, sh = v.y1 - v.y0;
       const dx0 = ((zoomBox.x0 - v.x0) / sw) * dw;
@@ -332,7 +333,7 @@ function render({ model, el }) {
 
     function updateScaleBar() {
       const f = frames[frameIdx];
-      const v = frameViews[frameIdx];
+      const v = view;
       const sbLenSrcPx = meta.scalebar_length_nm / meta.pixel_size_nm;
       const viewW = v.x1 - v.x0;
       const sbLenDispPx = (sbLenSrcPx / viewW) * imgCanvas.clientWidth;
@@ -401,7 +402,7 @@ function render({ model, el }) {
       const rect = imgCanvas.getBoundingClientRect();
       const dx = ((e.clientX - rect.left) / rect.width) * imgCanvas.width;
       const dy = ((e.clientY - rect.top) / rect.height) * imgCanvas.height;
-      const v = frameViews[frameIdx];
+      const v = view;
       return {
         x: v.x0 + (dx / imgCanvas.width) * (v.x1 - v.x0),
         y: v.y0 + (dy / imgCanvas.height) * (v.y1 - v.y0),
@@ -444,7 +445,7 @@ function render({ model, el }) {
         zoomBox.x1 = p.x; zoomBox.y1 = p.y;
         presentView();
       } else if (mode === "pan" && panState) {
-        const v = frameViews[frameIdx];
+        const v = view;
         const sw = v.x1 - v.x0, sh = v.y1 - v.y0;
         const dxSrc = -((e.clientX - panState.lastX) / imgCanvas.clientWidth) * sw;
         const dySrc = -((e.clientY - panState.lastY) / imgCanvas.clientHeight) * sh;
@@ -459,7 +460,7 @@ function render({ model, el }) {
 
     const endPointer = (e) => {
       if (mode === "zoom-box" && zoomBox) {
-        const v = frameViews[frameIdx];
+        const v = view;
         const dx = Math.abs(zoomBox.x1 - zoomBox.x0);
         const dy = Math.abs(zoomBox.y1 - zoomBox.y0);
         if (dx > 4 && dy > 4) {
@@ -488,7 +489,7 @@ function render({ model, el }) {
     imgCanvas.addEventListener("dblclick", (e) => {
       e.preventDefault();
       const f = frames[frameIdx];
-      const v = frameViews[frameIdx];
+      const v = view;
       const p = eventToView(e);
       const sw = v.x1 - v.x0;
       const newSide = Math.min(sw * 2, Math.min(f.W, f.H));  // keep square + clamp
@@ -503,7 +504,7 @@ function render({ model, el }) {
     imgCanvas.addEventListener("wheel", (e) => {
       e.preventDefault();
       const f = frames[frameIdx];
-      const v = frameViews[frameIdx];
+      const v = view;
       const p = eventToView(e);
       const side = v.x1 - v.x0;
       const factor = Math.exp(e.deltaY * 0.0015);  // wheel-up = deltaY<0 = zoom-in
@@ -524,7 +525,7 @@ function render({ model, el }) {
 
     function showMeta(e) {
       const f = frames[frameIdx];
-      const v = frameViews[frameIdx];
+      const v = view;
       const boxRect = imgBox.getBoundingClientRect();
       // Position popup near the click, clamped inside the image box
       const x = Math.min(e.clientX - boxRect.left, boxRect.width - 290);
@@ -549,7 +550,7 @@ function render({ model, el }) {
 
     resetBtn.addEventListener("click", () => {
       const f = frames[frameIdx];
-      frameViews[frameIdx] = { x0: 0, y0: 0, x1: f.W, y1: f.H };
+      view.x0 = 0; view.y0 = 0; view.x1 = f.W; view.y1 = f.H;
       hideMeta();
       presentView();
     });
@@ -607,6 +608,9 @@ function render({ model, el }) {
     frameSel.addEventListener("change", () => {
       frameIdx = parseInt(frameSel.value, 10);
       hideMeta();
+      // View is shared across frames — but if a future dataset has frames of
+      // different sizes the clamp keeps the view valid.
+      clampView(view);
       paint();
     });
     cmapSel.addEventListener("change", () => { cmapName = cmapSel.value; paint(); });
