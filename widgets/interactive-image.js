@@ -198,6 +198,11 @@ function render({ model, el }) {
       .${id}-meta .${id}-meta-close:hover { opacity: 1; }
       .${id}-img-box.${id}-pan-mode .${id}-img-canvas { cursor: grab; }
       .${id}-img-box.${id}-panning .${id}-img-canvas { cursor: grabbing; }
+      /* Colorbar */
+      .${id}-colorbar-wrap { position: relative; height: 480px; width: 60px; padding-left: 4px; padding-right: 40px; box-sizing: content-box; }
+      .${id}-colorbar-canvas { display: block; width: 14px; height: 100%; border-radius: 2px; }
+      .${id}-cb-tick { position: absolute; left: 22px; font-size: 11px; color: #888; font-variant-numeric: tabular-nums; white-space: nowrap; line-height: 1; transform: translateY(-50%); }
+      .${id}-cb-tick::before { content: ''; position: absolute; left: -5px; top: 50%; width: 4px; height: 1px; background: currentColor; }
     </style>
     <div class="${id}-wrap">
       <div class="${id}-loading">Loading image data…</div>
@@ -216,7 +221,8 @@ function render({ model, el }) {
           <div class="${id}-help-wrap">
             <div class="${id}-help-btn">Controls</div>
             <div class="${id}-help-tip">
-              <strong>Left drag</strong>: zoom to box<br>
+              <strong>Left drag</strong>: zoom to box (square)<br>
+              <strong>Double click</strong>: zoom out 2×<br>
               <strong>Middle drag</strong> or <kbd>Shift</kbd>+drag: pan<br>
               <strong>Wheel</strong>: zoom in / out<br>
               <strong>Right click</strong>: image metadata<br>
@@ -224,6 +230,9 @@ function render({ model, el }) {
             </div>
           </div>
           <div class="${id}-meta"></div>
+        </div>
+        <div class="${id}-colorbar-wrap">
+          <canvas class="${id}-colorbar-canvas" width="14" height="480"></canvas>
         </div>
         <div class="${id}-controls">
           <div class="${id}-ctrl">
@@ -261,6 +270,8 @@ function render({ model, el }) {
     const scalebarLabel = $(`.${id}-scalebar-label`);
     const resetBtn = $(`.${id}-reset`);
     const metaEl = $(`.${id}-meta`);
+    const colorbarCanvas = $(`.${id}-colorbar-canvas`);
+    const colorbarWrap = $(`.${id}-colorbar-wrap`);
 
     let frameIdx = 0;
     let cmapName = "gray";
@@ -341,6 +352,42 @@ function render({ model, el }) {
       ensureOffscreen();
       presentView();
       renderHistogram(histCanvas, f, r.vmin, r.vmax, cmapName);
+      renderColorbar();
+    }
+
+    // -----------------------------------------------------------
+    // Vertical colorbar with tick labels (top = vmax, bottom = vmin)
+    // -----------------------------------------------------------
+    function renderColorbar() {
+      const cmap = COLORMAPS[cmapName] || COLORMAPS.gray;
+      const r = frameRanges[frameIdx];
+      const W = colorbarCanvas.width;
+      const H = colorbarCanvas.height;
+      const ctx = colorbarCanvas.getContext("2d");
+      const img = ctx.createImageData(W, H);
+      for (let y = 0; y < H; y++) {
+        const t = 1 - y / (H - 1);  // top row -> max
+        const c = Math.max(0, Math.min(255, (t * 255) | 0));
+        const o = c * 3;
+        for (let x = 0; x < W; x++) {
+          const k = (y * W + x) * 4;
+          img.data[k] = cmap[o]; img.data[k + 1] = cmap[o + 1]; img.data[k + 2] = cmap[o + 2]; img.data[k + 3] = 255;
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+      // Ticks: 5 evenly spaced labels positioned by % of height
+      const nTicks = 5;
+      const ticks = [];
+      for (let i = 0; i < nTicks; i++) {
+        const tt = i / (nTicks - 1);              // 0 at top -> 1 at bottom
+        const value = r.vmax - tt * (r.vmax - r.vmin);
+        const topPct = tt * 100;
+        ticks.push(`<div class="${id}-cb-tick" style="top:${topPct}%">${value.toFixed(3)}</div>`);
+      }
+      // Rebuild tick spans (drop any old ones, keep canvas)
+      const oldTicks = colorbarWrap.querySelectorAll(`.${id}-cb-tick`);
+      oldTicks.forEach((n) => n.remove());
+      colorbarWrap.insertAdjacentHTML("beforeend", ticks.join(""));
     }
 
     // -----------------------------------------------------------
@@ -416,10 +463,14 @@ function render({ model, el }) {
         const dx = Math.abs(zoomBox.x1 - zoomBox.x0);
         const dy = Math.abs(zoomBox.y1 - zoomBox.y0);
         if (dx > 4 && dy > 4) {
-          v.x0 = Math.min(zoomBox.x0, zoomBox.x1);
-          v.x1 = Math.max(zoomBox.x0, zoomBox.x1);
-          v.y0 = Math.min(zoomBox.y0, zoomBox.y1);
-          v.y1 = Math.max(zoomBox.y0, zoomBox.y1);
+          // Force square: use the larger dimension as the side length, centered
+          // on the drag rectangle. Image is square so display canvas is square;
+          // a non-square view would stretch pixels non-uniformly.
+          const side = Math.max(dx, dy);
+          const cx = (zoomBox.x0 + zoomBox.x1) / 2;
+          const cy = (zoomBox.y0 + zoomBox.y1) / 2;
+          v.x0 = cx - side / 2; v.x1 = cx + side / 2;
+          v.y0 = cy - side / 2; v.y1 = cy + side / 2;
           clampView(v);
         }
         zoomBox = null;
@@ -433,26 +484,35 @@ function render({ model, el }) {
     imgCanvas.addEventListener("pointerup", endPointer);
     imgCanvas.addEventListener("pointercancel", endPointer);
 
+    // Double left-click: zoom out 2x, centered on click. Stops at full FOV.
+    imgCanvas.addEventListener("dblclick", (e) => {
+      e.preventDefault();
+      const f = frames[frameIdx];
+      const v = frameViews[frameIdx];
+      const p = eventToView(e);
+      const sw = v.x1 - v.x0;
+      const newSide = Math.min(sw * 2, Math.min(f.W, f.H));  // keep square + clamp
+      v.x0 = p.x - (p.x - v.x0) * (newSide / sw);
+      v.y0 = p.y - (p.y - v.y0) * (newSide / sw);
+      v.x1 = v.x0 + newSide;
+      v.y1 = v.y0 + newSide;
+      clampView(v);
+      presentView();
+    });
+
     imgCanvas.addEventListener("wheel", (e) => {
       e.preventDefault();
       const f = frames[frameIdx];
       const v = frameViews[frameIdx];
       const p = eventToView(e);
-      const sw = v.x1 - v.x0, sh = v.y1 - v.y0;
+      const side = v.x1 - v.x0;
       const factor = Math.exp(e.deltaY * 0.0015);  // wheel-up = deltaY<0 = zoom-in
-      let newSw = sw * factor, newSh = sh * factor;
-      // Cap at full image (zoom-out limit)
-      if (newSw > f.W) { newSh *= f.W / newSw; newSw = f.W; }
-      if (newSh > f.H) { newSw *= f.H / newSh; newSh = f.H; }
-      // Cap minimum view size (zoom-in limit)
-      const minPx = 16;
-      if (newSw < minPx) { newSh *= minPx / newSw; newSw = minPx; }
-      if (newSh < minPx) { newSw *= minPx / newSh; newSh = minPx; }
-      // Keep the cursor position invariant
-      v.x0 = p.x - (p.x - v.x0) * (newSw / sw);
-      v.y0 = p.y - (p.y - v.y0) * (newSh / sh);
-      v.x1 = v.x0 + newSw;
-      v.y1 = v.y0 + newSh;
+      // Square view, so a single side. Clamp to [16 px, min(W,H)].
+      const newSide = Math.max(16, Math.min(Math.min(f.W, f.H), side * factor));
+      v.x0 = p.x - (p.x - v.x0) * (newSide / side);
+      v.y0 = p.y - (p.y - v.y0) * (newSide / side);
+      v.x1 = v.x0 + newSide;
+      v.y1 = v.y0 + newSide;
       clampView(v);
       presentView();
     }, { passive: false });
