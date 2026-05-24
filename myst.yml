@@ -34,6 +34,7 @@ project:
   resources:
     - 'notebooks/**/*'
     - 'widgets/**/*'
+    - 'assets/**/*'
   references:
     mystmd: https://mystmd.org/guide
   exclude:
@@ -103,3 +104,36 @@ project:
     STEM: scanning transmission electron microscopy
 site:
   template: book-theme
+  title: Elemental Microscopy
+  short_title: EM
+  options:
+    # Custom CSS — see ./style.css for the actual rules.
+    style: ./style.css
+    # The text rendered next to the (omitted) logo in the upper-left.
+    # Coloring is done in style.css.
+    logo_text: Elemental Microscopy
+    logo_url: /
+    # Show only top-level entries by default in the right-hand outline.
+    outline_maxdepth: 2
+  nav:
+    - title: Overview
+      url: https://www.elementalmicroscopy.org/overview
+    - title: Latest Research
+      url: https://www.elementalmicroscopy.org/articles
+    - title: Submit
+      url: https://www.elementalmicroscopy.org/writing-an-article
+    - title: Team
+      url: https://www.elementalmicroscopy.org/editors
+  # book-theme exposes named "parts" — content blocks that the template
+  # slots into specific layout regions. We use:
+  #   navbar_end:  the right side of the top nav (MSA logo)
+  #   footer:      the bottom-of-page colophon (replaces "Made with MyST")
+  parts:
+    # Markdown image-link. The external-link icon book-theme adds is hidden
+    # by CSS targeting `.myst-navbar-end a svg.link-icon`.
+    navbar_end: |
+      [![MSA](/assets/msa-logo.svg)](https://www.microscopy.org/)
+    footer: |
+      Published by the [Microscopy Society of America](https://www.microscopy.org/). *Elemental Microscopy* is an open-access journal of MSA.
+    primary_sidebar_footer: |
+      *Elemental Microscopy* · MSA

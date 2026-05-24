@@ -1,0 +1,57 @@
+/* ============================================================
+   em-template-lite — Tier-1 theming on top of book-theme
+   Loaded via `site.options.style` in myst.yml.
+
+   Layout target for the top nav:
+       [ ☰ toggle  Elemental Microscopy ]   [ Overview · Latest · Submit · Team ]   [ MSA logo ]
+   ============================================================ */
+
+/* ---------- Site title (upper-left, red) ---------- */
+.myst-home-link,
+.myst-home-link span {
+  color: rgb(191, 0, 0) !important;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+.myst-home-link:hover span {
+  text-decoration: underline;
+  text-decoration-thickness: 1.5px;
+}
+/* Dark-mode contrast tweak — book-theme would otherwise override to white */
+html.dark .myst-home-link,
+html.dark .myst-home-link span {
+  color: rgb(220, 80, 80) !important;
+}
+
+/* ---------- Sidebar toggle visible on desktop ----------
+   book-theme hides the hamburger above the `xl` breakpoint (1280 px).
+   We bring it back so the reader can collapse the side nav even on
+   wide screens. The existing click handler in book-theme still works. */
+@media (min-width: 1280px) {
+  .myst-top-nav-bar > div:first-child > div:first-child {
+    display: block !important;
+  }
+}
+
+/* ---------- MSA logo in the navbar_end part ----------
+   Injected via the book-theme `navbar_end` part defined in myst.yml.
+   The part wraps content in `<div class="myst-navbar-end">…</div>`. */
+.myst-navbar-end p { margin: 0; }
+.myst-navbar-end a img {
+  height: 32px;
+  width: auto;
+  max-width: 160px;
+  display: block;
+}
+/* Hide the external-link arrow book-theme adds to off-site links. */
+.myst-navbar-end a svg.link-icon { display: none; }
+
+@media (max-width: 640px) {
+  .myst-navbar-end a img { height: 24px; max-width: 110px; }
+}
+@media (max-width: 420px) {
+  .myst-navbar-end { display: none; }
+}
+
+/* ---------- Nav links: a hair more breathing room ---------- */
+.myst-top-nav-item { font-weight: 500; }
