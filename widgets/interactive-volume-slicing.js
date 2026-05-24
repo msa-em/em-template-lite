@@ -176,9 +176,9 @@ function render({ model, el }) {
       .${id}-wrap { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #888; font-size: 13px; line-height: 1.4; }
       .${id}-row { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
       .${id}-colorbar-wrap { position: relative; height: ${PANEL_PX * 2 + 4}px; width: 42px; flex-shrink: 0; }
-      .${id}-colorbar-canvas { display: block; width: 12px; height: 100%; border-radius: 2px; }
-      .${id}-cb-tick { position: absolute; left: 18px; font-size: 10px; color: #888; font-variant-numeric: tabular-nums; white-space: nowrap; line-height: 1; transform: translateY(-50%); }
-      .${id}-cb-tick::before { content: ''; position: absolute; left: -5px; top: 50%; width: 4px; height: 1px; background: currentColor; }
+      .${id}-colorbar-canvas { display: block; width: 12px; height: 100%; border-radius: 2px; position: absolute; right: 0; top: 0; }
+      .${id}-cb-tick { position: absolute; right: 18px; font-size: 10px; color: #888; font-variant-numeric: tabular-nums; white-space: nowrap; line-height: 1; transform: translateY(-50%); text-align: right; }
+      .${id}-cb-tick::before { content: ''; position: absolute; right: -5px; top: 50%; width: 4px; height: 1px; background: currentColor; }
       .${id}-grid { display: grid; grid-template-columns: ${PANEL_PX}px ${PANEL_PX}px; grid-template-rows: ${PANEL_PX}px ${PANEL_PX}px; gap: 4px; flex-shrink: 0; }
       .${id}-panel { position: relative; background: #000; border-radius: 4px; overflow: hidden; user-select: none; cursor: crosshair; }
       .${id}-panel canvas { display: block; width: 100%; height: 100%; image-rendering: pixelated; }
@@ -352,7 +352,7 @@ function render({ model, el }) {
         const tt = i / (nTicks - 1);
         const u8val = range.vmax - tt * (range.vmax - range.vmin);
         const rawVal = meta.vmin_raw + (u8val / 255) * (meta.vmax_raw - meta.vmin_raw);
-        ticks.push(`<div class="${id}-cb-tick" style="top:${tt * 100}%">${rawVal.toExponential(2)}</div>`);
+        ticks.push(`<div class="${id}-cb-tick" style="top:${tt * 100}%">${formatTickValue(rawVal)}</div>`);
       }
       colorbarWrap.querySelectorAll(`.${id}-cb-tick`).forEach(n => n.remove());
       colorbarWrap.insertAdjacentHTML("beforeend", ticks.join(""));
@@ -487,6 +487,23 @@ function render({ model, el }) {
   }).catch(err => {
     wrap.innerHTML = `<div style="padding: 16px; color: #c33; font-family: monospace; font-size: 12px;">Failed to load volume data:<br>${err.message}</div>`;
   });
+}
+
+
+// Compact number formatter for colorbar ticks: 2-3 sig figs with no
+// trailing zeros, falling back to scientific for very small / large values.
+function formatTickValue(v) {
+  if (v === 0) return "0";
+  const a = Math.abs(v);
+  let s;
+  if (a >= 100)      s = v.toFixed(0);
+  else if (a >= 10)  s = v.toFixed(1);
+  else if (a >= 1)   s = v.toFixed(2);
+  else if (a >= 0.01) s = v.toFixed(3);
+  else               return v.toExponential(1);
+  if (s.includes(".")) s = s.replace(/0+$/, "").replace(/\.$/, "");
+  if (s === "0" || s === "-0") return v.toExponential(1);
+  return s;
 }
 
 export default { render };

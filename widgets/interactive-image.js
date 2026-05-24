@@ -200,11 +200,12 @@ function render({ model, el }) {
       .${id}-img-box.${id}-pan-mode .${id}-img-canvas { cursor: grab; }
       .${id}-img-box.${id}-panning .${id}-img-canvas { cursor: grabbing; }
       .${id}-readout { display: none; position: absolute; background: rgba(0,0,0,0.85); color: #fff; padding: 3px 8px; border-radius: 3px; font-size: 11px; font-family: ui-monospace, SFMono-Regular, monospace; pointer-events: none; white-space: nowrap; z-index: 11; }
-      /* Colorbar: 12 canvas + 4 gap + ~26 numeric label = 42 px column */
+      /* Colorbar with tick labels on the OUTSIDE edge (left of canvas).
+         42 px column: ~26 px label + 4 px tick + 12 px canvas, right-aligned. */
       .${id}-colorbar-wrap { position: relative; height: 440px; width: 42px; flex-shrink: 0; }
-      .${id}-colorbar-canvas { display: block; width: 12px; height: 100%; border-radius: 2px; }
-      .${id}-cb-tick { position: absolute; left: 18px; font-size: 10px; color: #888; font-variant-numeric: tabular-nums; white-space: nowrap; line-height: 1; transform: translateY(-50%); }
-      .${id}-cb-tick::before { content: ''; position: absolute; left: -5px; top: 50%; width: 4px; height: 1px; background: currentColor; }
+      .${id}-colorbar-canvas { display: block; width: 12px; height: 100%; border-radius: 2px; position: absolute; right: 0; top: 0; }
+      .${id}-cb-tick { position: absolute; right: 18px; font-size: 10px; color: #888; font-variant-numeric: tabular-nums; white-space: nowrap; line-height: 1; transform: translateY(-50%); text-align: right; }
+      .${id}-cb-tick::before { content: ''; position: absolute; right: -5px; top: 50%; width: 4px; height: 1px; background: currentColor; }
     </style>
     <div class="${id}-wrap">
       <div class="${id}-loading">Loading image data…</div>
@@ -363,6 +364,22 @@ function render({ model, el }) {
       return `${v.toExponential(0)} nm`;
     }
 
+    // Compact number formatter for colorbar ticks: 2-3 sig figs with no
+    // trailing zeros, falling back to scientific for very small / large values.
+    function formatTickValue(v) {
+      if (v === 0) return "0";
+      const a = Math.abs(v);
+      let s;
+      if (a >= 100)      s = v.toFixed(0);
+      else if (a >= 10)  s = v.toFixed(1);
+      else if (a >= 1)   s = v.toFixed(2);
+      else if (a >= 0.01) s = v.toFixed(3);
+      else               return v.toExponential(1);
+      if (s.includes(".")) s = s.replace(/0+$/, "").replace(/\.$/, "");
+      if (s === "0" || s === "-0") return v.toExponential(1);
+      return s;
+    }
+
     function paint() {
       const f = frames[frameIdx];
       const r = frameRanges[frameIdx];
@@ -405,7 +422,7 @@ function render({ model, el }) {
         const tt = i / (nTicks - 1);              // 0 at top -> 1 at bottom
         const value = r.vmax - tt * (r.vmax - r.vmin);
         const topPct = tt * 100;
-        ticks.push(`<div class="${id}-cb-tick" style="top:${topPct}%">${value.toFixed(3)}</div>`);
+        ticks.push(`<div class="${id}-cb-tick" style="top:${topPct}%">${formatTickValue(value)}</div>`);
       }
       // Rebuild tick spans (drop any old ones, keep canvas)
       const oldTicks = colorbarWrap.querySelectorAll(`.${id}-cb-tick`);

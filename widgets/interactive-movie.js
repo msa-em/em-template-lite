@@ -198,11 +198,12 @@ function render({ model, el }) {
       .${id}-img-box.${id}-pan-mode .${id}-img-canvas { cursor: grab; }
       .${id}-img-box.${id}-panning .${id}-img-canvas { cursor: grabbing; }
       .${id}-readout { display: none; position: absolute; background: rgba(0,0,0,0.85); color: #fff; padding: 3px 8px; border-radius: 3px; font-size: 11px; font-family: ui-monospace, SFMono-Regular, monospace; pointer-events: none; white-space: nowrap; z-index: 11; }
-      /* Colorbar (left edge): 12 canvas + 4 gap + ~26 numeric label = 42 px column */
+      /* Colorbar with tick labels on the OUTSIDE edge (left of canvas).
+         42 px column: ~26 px label + 4 px tick + 12 px canvas, right-aligned. */
       .${id}-colorbar-wrap { position: relative; height: 420px; width: 42px; flex-shrink: 0; }
-      .${id}-colorbar-canvas { display: block; width: 12px; height: 100%; border-radius: 2px; }
-      .${id}-cb-tick { position: absolute; left: 18px; font-size: 10px; color: #888; font-variant-numeric: tabular-nums; white-space: nowrap; line-height: 1; transform: translateY(-50%); }
-      .${id}-cb-tick::before { content: ''; position: absolute; left: -5px; top: 50%; width: 4px; height: 1px; background: currentColor; }
+      .${id}-colorbar-canvas { display: block; width: 12px; height: 100%; border-radius: 2px; position: absolute; right: 0; top: 0; }
+      .${id}-cb-tick { position: absolute; right: 18px; font-size: 10px; color: #888; font-variant-numeric: tabular-nums; white-space: nowrap; line-height: 1; transform: translateY(-50%); text-align: right; }
+      .${id}-cb-tick::before { content: ''; position: absolute; right: -5px; top: 50%; width: 4px; height: 1px; background: currentColor; }
       /* Playback controls — all three buttons fit on one row in a 210 px column */
       .${id}-pb-buttons { display: flex; gap: 4px; flex-wrap: nowrap; align-items: center; }
       .${id}-pb-btn { background: transparent; border: 1px solid #bbb; color: inherit; padding: 3px 6px; border-radius: 4px; font-size: 11px; cursor: pointer; font-family: inherit; line-height: 1.2; white-space: nowrap; flex: 0 0 auto; }
@@ -266,6 +267,10 @@ function render({ model, el }) {
               <input class="${id}-pb-slider" type="range" min="0" max="${nFrames - 1}" step="1" value="0" />
               <span class="${id}-pb-counter">1 / ${nFrames}</span>
             </div>
+            <div class="${id}-pb-slider-row">
+              <input class="${id}-pb-fps" type="range" min="1" max="60" step="1" value="${meta.playback_fps_default || 20}" title="Playback frame rate (fps)" />
+              <span class="${id}-pb-counter ${id}-pb-fps-val">${meta.playback_fps_default || 20} fps</span>
+            </div>
           </div>
           <div class="${id}-ctrl">
             <div class="${id}-section-label">Colormap</div>
@@ -297,6 +302,8 @@ function render({ model, el }) {
     const bounceBtn = $(`.${id}-pb-bounce-btn`);
     const frameSlider = $(`.${id}-pb-slider`);
     const frameCounter = $(`.${id}-pb-counter`);
+    const fpsSlider = $(`.${id}-pb-fps`);
+    const fpsVal = $(`.${id}-pb-fps-val`);
 
     let frameIdx = 0;
     let cmapName = "gray";
@@ -311,11 +318,11 @@ function render({ model, el }) {
     // Shared viewport.
     const view = { x0: 0, y0: 0, x1: frames[0].W, y1: frames[0].H };
 
-    // Playback state.
-    const FRAME_INTERVAL_MS = 1000 / (meta.playback_fps_default || 20);
+    // Playback state. `fps` is user-controlled via the frame-rate slider.
     let playing = false;
     let playDir = 1;       // +1 forward, -1 reverse (used with bounce)
     let loopMode = "loop"; // "loop" | "bounce" | "once"
+    let fps = meta.playback_fps_default || 20;
     let rafId = null;
     let lastTick = 0;
 
@@ -390,6 +397,22 @@ function render({ model, el }) {
       return `${v.toExponential(0)} nm`;
     }
 
+    // Compact number formatter for colorbar ticks: 2-3 sig figs with no
+    // trailing zeros, falling back to scientific for very small / large values.
+    function formatTickValue(v) {
+      if (v === 0) return "0";
+      const a = Math.abs(v);
+      let s;
+      if (a >= 100)      s = v.toFixed(0);
+      else if (a >= 10)  s = v.toFixed(1);
+      else if (a >= 1)   s = v.toFixed(2);
+      else if (a >= 0.01) s = v.toFixed(3);
+      else               return v.toExponential(1);
+      if (s.includes(".")) s = s.replace(/0+$/, "").replace(/\.$/, "");
+      if (s === "0" || s === "-0") return v.toExponential(1);
+      return s;
+    }
+
     function paint() {
       // Clamp the shared display range to [0, 255] (uint8 source)
       range.vmin = Math.max(0, Math.min(range.vmin, 255));
@@ -430,7 +453,7 @@ function render({ model, el }) {
         const tt = i / (nTicks - 1);              // 0 at top -> 1 at bottom
         const value = r.vmax - tt * (r.vmax - r.vmin);
         const topPct = tt * 100;
-        ticks.push(`<div class="${id}-cb-tick" style="top:${topPct}%">${value.toFixed(3)}</div>`);
+        ticks.push(`<div class="${id}-cb-tick" style="top:${topPct}%">${formatTickValue(value)}</div>`);
       }
       // Rebuild tick spans (drop any old ones, keep canvas)
       const oldTicks = colorbarWrap.querySelectorAll(`.${id}-cb-tick`);
@@ -714,7 +737,7 @@ function render({ model, el }) {
 
     function tick(now) {
       if (!playing) return;
-      if (now - lastTick >= FRAME_INTERVAL_MS) {
+      if (now - lastTick >= 1000 / fps) {
         advanceFrame();
         lastTick = now;
       }
@@ -746,6 +769,13 @@ function render({ model, el }) {
     playBtn.addEventListener("click", () => setPlaying(!playing));
     loopBtn.addEventListener("click", () => setLoopMode(loopMode === "loop" ? "once" : "loop"));
     bounceBtn.addEventListener("click", () => setLoopMode(loopMode === "bounce" ? "once" : "bounce"));
+    fpsSlider.addEventListener("input", () => {
+      fps = parseInt(fpsSlider.value, 10);
+      fpsVal.textContent = `${fps} fps`;
+      // Reset tick clock so the new rate takes effect on the next frame.
+      lastTick = performance.now();
+    });
+
     frameSlider.addEventListener("input", () => {
       frameIdx = parseInt(frameSlider.value, 10);
       // Reset bounce direction on scrub so user-driven motion is monotonic.
