@@ -58,6 +58,15 @@ jobs:
             --contents notebooks \
             --output-dir _output/site/lite
 
+      - name: Stub piplite warehouse (silences `pypi/all.json` 404 warnings)
+        run: |
+          # Piplite probes <site>/pypi/all.json for a local wheel index. When
+          # that 404s it falls back to PyPI proper — which works, but pollutes
+          # the cell output with multi-line warnings. An empty JSON object is a
+          # valid (empty) warehouse, so piplite silently skips it.
+          mkdir -p _output/site/pypi
+          echo '{}' > _output/site/pypi/all.json
+
       - name: Build MyST static site
         env:
           # GitHub Pages serves this repo at /em-template-lite/. MyST uses

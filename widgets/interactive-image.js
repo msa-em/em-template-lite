@@ -100,50 +100,46 @@ function renderImage(canvas, frame, displayVmin, displayVmax, cmapName) {
 }
 
 function renderHistogram(canvas, frame, displayVmin, displayVmax, cmapName) {
+  // Draw a histogram where each bar is colored by where it falls in the
+  // current [displayVmin, displayVmax] window. Bars outside the window are
+  // gray; bars inside are tinted with the colormap. Vertical handles mark
+  // the window edges. This makes the colormap and the histogram visible
+  // *together* rather than the tint hiding the shape.
   const { hist, nBins, vmin, vmax } = frame;
   const cmap = COLORMAPS[cmapName] || COLORMAPS.gray;
   const W = canvas.width, H = canvas.height;
   const ctx = canvas.getContext("2d");
-  ctx.fillStyle = "rgba(230,220,220,1)";
+
+  ctx.fillStyle = "#f5e6e6";
   ctx.fillRect(0, 0, W, H);
 
-  // Histogram path
-  ctx.fillStyle = "#888";
-  ctx.beginPath();
-  ctx.moveTo(0, H);
-  for (let b = 0; b < nBins; b++) {
-    const x = (b / (nBins - 1)) * W;
-    const y = H - hist[b] * H * 0.95;
-    ctx.lineTo(x, y);
-  }
-  ctx.lineTo(W, H);
-  ctx.closePath();
-  ctx.fill();
-
-  // Tint the area between displayVmin and displayVmax with the colormap.
   const span = vmax - vmin;
-  if (span > 0) {
-    const xMin = Math.max(0, Math.min(W, ((displayVmin - vmin) / span) * W));
-    const xMax = Math.max(0, Math.min(W, ((displayVmax - vmin) / span) * W));
-    if (xMax > xMin) {
-      const tinted = ctx.createImageData(Math.max(1, Math.ceil(xMax - xMin)), H);
-      const td = tinted.data;
-      for (let x = 0; x < tinted.width; x++) {
-        const t = x / Math.max(1, tinted.width - 1);
-        const c = (t * 255) | 0;
-        const o = c * 3;
-        for (let y = 0; y < H; y++) {
-          const k = (y * tinted.width + x) * 4;
-          td[k] = cmap[o]; td[k + 1] = cmap[o + 1]; td[k + 2] = cmap[o + 2]; td[k + 3] = 180;
-        }
-      }
-      ctx.putImageData(tinted, xMin, 0);
+  const displaySpan = displayVmax - displayVmin || 1;
+  const barWidth = W / nBins;
+  for (let b = 0; b < nBins; b++) {
+    const bcenter = vmin + ((b + 0.5) / nBins) * span;
+    const t = (bcenter - displayVmin) / displaySpan;
+    let r, g, bl;
+    if (t < 0 || t > 1) {
+      r = g = bl = 170;  // outside window: muted gray
+    } else {
+      const c = (t * 255) | 0;
+      const o = c * 3;
+      r = cmap[o]; g = cmap[o + 1]; bl = cmap[o + 2];
     }
-    // Vertical lines at vmin/vmax
-    ctx.strokeStyle = cmap[0 * 3 + 0] !== undefined
-      ? `rgb(${cmap[0]},${cmap[1]},${cmap[2]})` : "#000";
+    ctx.fillStyle = `rgb(${r},${g},${bl})`;
+    const barH = hist[b] * H * 0.95;
+    ctx.fillRect(b * barWidth, H - barH, barWidth + 1, barH);
+  }
+
+  // Window handles
+  if (span > 0) {
+    const xMin = ((displayVmin - vmin) / span) * W;
+    const xMax = ((displayVmax - vmin) / span) * W;
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = `rgb(${cmap[0]},${cmap[1]},${cmap[2]})`;
     ctx.beginPath(); ctx.moveTo(xMin, 0); ctx.lineTo(xMin, H); ctx.stroke();
-    ctx.strokeStyle = `rgb(${cmap[255 * 3]},${cmap[255 * 3 + 1]},${cmap[255 * 3 + 2]})`;
+    ctx.strokeStyle = `rgb(${cmap[765]},${cmap[766]},${cmap[767]})`;
     ctx.beginPath(); ctx.moveTo(xMax, 0); ctx.lineTo(xMax, H); ctx.stroke();
   }
 }
@@ -171,23 +167,27 @@ function render({ model, el }) {
 
   el.innerHTML = `
     <style>
-      .${id}-wrap { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #222; }
-      .${id}-row { display: flex; gap: 14px; align-items: flex-start; flex-wrap: wrap; }
+      .${id}-wrap { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #222; font-size: 13px; line-height: 1.4; }
+      .${id}-row { display: flex; gap: 18px; align-items: flex-start; flex-wrap: wrap; }
       .${id}-img-box { position: relative; background: #fff; border-radius: 6px; }
       .${id}-img-canvas { display: block; width: 480px; height: 480px; image-rendering: pixelated; cursor: crosshair; border-radius: 6px; }
-      .${id}-controls { display: flex; flex-direction: column; gap: 10px; min-width: 200px; }
-      .${id}-hist-canvas { display: block; width: 200px; height: 90px; background: #f5e6e6; border-radius: 4px; }
-      .${id}-slider-row { display: flex; flex-direction: column; gap: 4px; font-size: 11px; }
-      .${id}-slider-row input[type="range"] { width: 100%; }
-      .${id}-slider-label { display: flex; justify-content: space-between; font-variant-numeric: tabular-nums; color: #555; }
-      .${id}-ctrl { display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
-      .${id}-ctrl select { padding: 3px 4px; font-size: 12px; }
+      .${id}-controls { display: flex; flex-direction: column; gap: 14px; min-width: 220px; }
+      .${id}-section-label { font-weight: 600; font-size: 12px; color: #444; letter-spacing: 0.02em; }
+      .${id}-hist-canvas { display: block; width: 220px; height: 90px; background: #f5e6e6; border-radius: 4px; margin: 4px 0; }
+      .${id}-slider-block { display: flex; flex-direction: column; gap: 6px; }
+      .${id}-slider-row { display: flex; flex-direction: column; gap: 2px; }
+      .${id}-slider-row input[type="range"] { width: 100%; margin: 0; }
+      .${id}-slider-header { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; color: #555; }
+      .${id}-slider-header .${id}-val { font-variant-numeric: tabular-nums; color: #222; font-weight: 500; }
+      .${id}-ctrl { display: flex; flex-direction: column; gap: 4px; }
+      .${id}-ctrl select { padding: 4px 6px; font-size: 13px; border: 1px solid #ccc; border-radius: 4px; background: #fff; }
+      .${id}-ctrl-inline { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
       .${id}-loading { padding: 20px; color: #888; font-size: 13px; }
-      .${id}-scalebar { position: absolute; left: 4%; bottom: 6%; height: 5px; background: #fff; box-shadow: 0 0 2px #000; }
-      .${id}-scalebar-label { position: absolute; left: 4%; bottom: calc(6% + 8px); color: #fff; text-shadow: 0 0 3px #000; font-size: 11px; font-weight: 600; }
+      .${id}-scalebar { position: absolute; left: 5%; bottom: 7%; height: 5px; background: #fff; box-shadow: 0 0 2px rgba(0,0,0,0.6); border-radius: 1px; }
+      .${id}-scalebar-label { position: absolute; left: 5%; bottom: calc(7% + 9px); color: #fff; text-shadow: 0 0 3px #000, 0 0 3px #000; font-size: 12px; font-weight: 600; }
     </style>
     <div class="${id}-wrap">
-      <div class="${id}-loading">Loading interactive image data…</div>
+      <div class="${id}-loading">Loading image data…</div>
     </div>`;
 
   const wrap = el.querySelector(`.${id}-wrap`);
@@ -201,20 +201,27 @@ function render({ model, el }) {
           <div class="${id}-scalebar-label"></div>
         </div>
         <div class="${id}-controls">
-          <canvas class="${id}-hist-canvas" width="200" height="90"></canvas>
-          <div class="${id}-slider-row">
-            <input class="${id}-vmin" type="range" min="0" max="1000" step="1" />
-            <div class="${id}-slider-label"><span>vmin: <span class="${id}-vmin-val"></span></span></div>
-            <input class="${id}-vmax" type="range" min="0" max="1000" step="1" />
-            <div class="${id}-slider-label"><span>vmax: <span class="${id}-vmax-val"></span></span></div>
+          <div class="${id}-slider-block">
+            <div class="${id}-section-label">Display range</div>
+            <canvas class="${id}-hist-canvas" width="220" height="90"></canvas>
+            <div class="${id}-slider-row">
+              <div class="${id}-slider-header"><span>min</span><span class="${id}-val ${id}-vmin-val"></span></div>
+              <input class="${id}-vmin" type="range" min="0" max="1000" step="1" />
+            </div>
+            <div class="${id}-slider-row">
+              <div class="${id}-slider-header"><span>max</span><span class="${id}-val ${id}-vmax-val"></span></div>
+              <input class="${id}-vmax" type="range" min="0" max="1000" step="1" />
+            </div>
           </div>
-          <label class="${id}-ctrl">Frame
+          <div class="${id}-ctrl">
+            <div class="${id}-section-label">Frame</div>
             <select class="${id}-frame">${frames.map((f, i) => `<option value="${i}">${f.label}</option>`).join("")}</select>
-          </label>
-          <label class="${id}-ctrl">Colormap
+          </div>
+          <div class="${id}-ctrl">
+            <div class="${id}-section-label">Colormap</div>
             <select class="${id}-cmap">${COLORMAP_NAMES.map(n => `<option value="${n}"${n === "gray" ? " selected" : ""}>${n}</option>`).join("")}</select>
-          </label>
-          <label class="${id}-ctrl" style="flex-direction: row; align-items: center; gap: 6px;">
+          </div>
+          <label class="${id}-ctrl-inline">
             <input class="${id}-scalebar-toggle" type="checkbox" checked /> Show scale bar
           </label>
         </div>

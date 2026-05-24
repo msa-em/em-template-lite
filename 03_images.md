@@ -68,15 +68,11 @@ You can zoom in, pan around, change the contrast range, and even change the colo
 Additionally we can use a dropdown menu to select either the EWR phase or amplitude. 
 We reference [](#fig_EWR_graphene_interactive) in the same manner as before.
 
-## Kernel-less alternative: `anywidget`
+## Showing images without compute
 
-The figure above runs a Python kernel in the reader's browser via [JupyterLite](https://jupyterlite.readthedocs.io).
-That brings the full scientific Python stack to the page, but at a cost: a 5–15 second kernel boot and a multi-megabyte Pyodide download on first interaction.
+The widget above runs a Python kernel in the reader's browser. A second option is to skip Python entirely and build the same controls in JavaScript — the page then loads instantly and works offline, at the cost of being limited to what JS can do. [Figure 1.10](#fig_EWR_graphene_anywidget) shows the same exit wave reconstruction this way, using [anywidget](https://anywidget.dev).
 
-For widgets where pure JavaScript is sufficient, [anywidget](https://anywidget.dev)-style components offer an alternative — no Python in the browser, the interactive loads instantly, and the underlying data can still be the same `.npz` (or in our case, a uint16-quantized version of it built once at deploy time).
-
-The figure below is the same exit-wave-reconstruction viewer, implemented as a kernel-less anywidget:
-
+(fig_EWR_graphene_anywidget)=
 :::{anywidget} ./widgets/interactive-image.js
 {
   "data_url": "../widgets/data/interactive_image.bin",
@@ -84,6 +80,5 @@ The figure below is the same exit-wave-reconstruction viewer, implemented as a k
 }
 :::
 
-Both versions read the same underlying graphene HRTEM reconstruction, and offer the same controls (frame, colormap, histogram-based contrast, scale bar).
-The choice between them is editorial: kernel-backed widgets are open-ended (a reader can edit the code inline and re-run), while anywidget components are fast and self-contained.
+**Figure 1.10.** Exit wave reconstruction of a single-layer graphene GB, from HRTEM focal series. Adapted from {cite:t}`ophus2016automatic`.
 
