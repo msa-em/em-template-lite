@@ -100,17 +100,18 @@ function renderImage(canvas, frame, displayVmin, displayVmax, cmapName) {
 }
 
 function renderHistogram(canvas, frame, displayVmin, displayVmax, cmapName) {
-  // Draw a histogram where each bar is colored by where it falls in the
-  // current [displayVmin, displayVmax] window. Bars outside the window are
-  // gray; bars inside are tinted with the colormap. Vertical handles mark
-  // the window edges. This makes the colormap and the histogram visible
-  // *together* rather than the tint hiding the shape.
+  // Draw a histogram with each bar colored by where it falls in the current
+  // [displayVmin, displayVmax] window. Bars *outside* the window are clamped
+  // to the colormap's first / last colour (matplotlib's under/over behaviour),
+  // so they read as "below threshold" / "above threshold" rather than a
+  // disconnected gray band. The two vertical lines are draggable handles
+  // (drag logic lives on the canvas's pointer handlers, not in this function).
   const { hist, nBins, vmin, vmax } = frame;
   const cmap = COLORMAPS[cmapName] || COLORMAPS.gray;
   const W = canvas.width, H = canvas.height;
   const ctx = canvas.getContext("2d");
 
-  ctx.fillStyle = "#f5e6e6";
+  ctx.fillStyle = "rgb(191,191,191)";
   ctx.fillRect(0, 0, W, H);
 
   const span = vmax - vmin;
@@ -119,27 +120,24 @@ function renderHistogram(canvas, frame, displayVmin, displayVmax, cmapName) {
   for (let b = 0; b < nBins; b++) {
     const bcenter = vmin + ((b + 0.5) / nBins) * span;
     const t = (bcenter - displayVmin) / displaySpan;
-    let r, g, bl;
-    if (t < 0 || t > 1) {
-      r = g = bl = 170;  // outside window: muted gray
-    } else {
-      const c = (t * 255) | 0;
-      const o = c * 3;
-      r = cmap[o]; g = cmap[o + 1]; bl = cmap[o + 2];
-    }
-    ctx.fillStyle = `rgb(${r},${g},${bl})`;
+    const c = Math.max(0, Math.min(255, (t * 255) | 0));  // clamp -> under/over saturate
+    const o = c * 3;
+    ctx.fillStyle = `rgb(${cmap[o]},${cmap[o + 1]},${cmap[o + 2]})`;
     const barH = hist[b] * H * 0.95;
     ctx.fillRect(b * barWidth, H - barH, barWidth + 1, barH);
   }
 
-  // Window handles
+  // Window handles: thick vertical lines drawn in the *opposite* colour so
+  // they're visible against the bars they sit on.
   if (span > 0) {
     const xMin = ((displayVmin - vmin) / span) * W;
     const xMax = ((displayVmax - vmin) / span) * W;
-    ctx.lineWidth = 1.5;
-    ctx.strokeStyle = `rgb(${cmap[0]},${cmap[1]},${cmap[2]})`;
-    ctx.beginPath(); ctx.moveTo(xMin, 0); ctx.lineTo(xMin, H); ctx.stroke();
+    ctx.lineWidth = 2;
+    // Min handle: drawn in the colormap's max colour (contrasts with min-end bars)
     ctx.strokeStyle = `rgb(${cmap[765]},${cmap[766]},${cmap[767]})`;
+    ctx.beginPath(); ctx.moveTo(xMin, 0); ctx.lineTo(xMin, H); ctx.stroke();
+    // Max handle: drawn in the colormap's min colour (contrasts with max-end bars)
+    ctx.strokeStyle = `rgb(${cmap[0]},${cmap[1]},${cmap[2]})`;
     ctx.beginPath(); ctx.moveTo(xMax, 0); ctx.lineTo(xMax, H); ctx.stroke();
   }
 }
@@ -167,21 +165,20 @@ function render({ model, el }) {
 
   el.innerHTML = `
     <style>
-      .${id}-wrap { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #222; font-size: 13px; line-height: 1.4; }
+      /* Labels use a medium gray that reads well on both light and dark
+         backgrounds; section headers go a bit darker so they stand out. */
+      .${id}-wrap { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #888; font-size: 13px; line-height: 1.4; }
       .${id}-row { display: flex; gap: 18px; align-items: flex-start; flex-wrap: wrap; }
       .${id}-img-box { position: relative; background: #fff; border-radius: 6px; }
       .${id}-img-canvas { display: block; width: 480px; height: 480px; image-rendering: pixelated; cursor: crosshair; border-radius: 6px; }
       .${id}-controls { display: flex; flex-direction: column; gap: 14px; min-width: 220px; }
-      .${id}-section-label { font-weight: 600; font-size: 12px; color: #444; letter-spacing: 0.02em; }
-      .${id}-hist-canvas { display: block; width: 220px; height: 90px; background: #f5e6e6; border-radius: 4px; margin: 4px 0; }
-      .${id}-slider-block { display: flex; flex-direction: column; gap: 6px; }
-      .${id}-slider-row { display: flex; flex-direction: column; gap: 2px; }
-      .${id}-slider-row input[type="range"] { width: 100%; margin: 0; }
-      .${id}-slider-header { display: flex; justify-content: space-between; align-items: baseline; font-size: 12px; color: #555; }
-      .${id}-slider-header .${id}-val { font-variant-numeric: tabular-nums; color: #222; font-weight: 500; }
+      .${id}-section-label { font-weight: 600; font-size: 12px; color: #888; letter-spacing: 0.02em; }
+      .${id}-hist-canvas { display: block; width: 220px; height: 90px; background: rgb(191,191,191); border-radius: 4px; margin: 4px 0; cursor: ew-resize; touch-action: none; }
+      .${id}-hist-values { display: flex; justify-content: space-between; font-size: 12px; font-variant-numeric: tabular-nums; color: #888; }
+      .${id}-hist-values .${id}-val { color: currentColor; font-weight: 500; }
       .${id}-ctrl { display: flex; flex-direction: column; gap: 4px; }
-      .${id}-ctrl select { padding: 4px 6px; font-size: 13px; border: 1px solid #ccc; border-radius: 4px; background: #fff; }
-      .${id}-ctrl-inline { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; }
+      .${id}-ctrl select { padding: 4px 6px; font-size: 13px; border: 1px solid #bbb; border-radius: 4px; background: transparent; color: inherit; }
+      .${id}-ctrl-inline { display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer; color: #888; }
       .${id}-loading { padding: 20px; color: #888; font-size: 13px; }
       .${id}-scalebar { position: absolute; left: 5%; bottom: 7%; height: 5px; background: #fff; box-shadow: 0 0 2px rgba(0,0,0,0.6); border-radius: 1px; }
       .${id}-scalebar-label { position: absolute; left: 5%; bottom: calc(7% + 9px); color: #fff; text-shadow: 0 0 3px #000, 0 0 3px #000; font-size: 12px; font-weight: 600; }
@@ -201,16 +198,12 @@ function render({ model, el }) {
           <div class="${id}-scalebar-label"></div>
         </div>
         <div class="${id}-controls">
-          <div class="${id}-slider-block">
-            <div class="${id}-section-label">Display range</div>
+          <div class="${id}-ctrl">
+            <div class="${id}-section-label">Display range — drag handles</div>
             <canvas class="${id}-hist-canvas" width="220" height="90"></canvas>
-            <div class="${id}-slider-row">
-              <div class="${id}-slider-header"><span>min</span><span class="${id}-val ${id}-vmin-val"></span></div>
-              <input class="${id}-vmin" type="range" min="0" max="1000" step="1" />
-            </div>
-            <div class="${id}-slider-row">
-              <div class="${id}-slider-header"><span>max</span><span class="${id}-val ${id}-vmax-val"></span></div>
-              <input class="${id}-vmax" type="range" min="0" max="1000" step="1" />
+            <div class="${id}-hist-values">
+              <span>min: <span class="${id}-val ${id}-vmin-val"></span></span>
+              <span>max: <span class="${id}-val ${id}-vmax-val"></span></span>
             </div>
           </div>
           <div class="${id}-ctrl">
@@ -230,8 +223,6 @@ function render({ model, el }) {
     const $ = (sel) => wrap.querySelector(sel);
     const imgCanvas = $(`.${id}-img-canvas`);
     const histCanvas = $(`.${id}-hist-canvas`);
-    const vminInput = $(`.${id}-vmin`);
-    const vmaxInput = $(`.${id}-vmax`);
     const vminVal = $(`.${id}-vmin-val`);
     const vmaxVal = $(`.${id}-vmax-val`);
     const frameSel = $(`.${id}-frame`);
@@ -243,54 +234,89 @@ function render({ model, el }) {
     let frameIdx = 0;
     let cmapName = "gray";
 
-    function sliderInit() {
-      const f = frames[frameIdx];
-      // Default display window: mean ± std (matches notebook).
-      const initMin = f.mean - 1 * f.std;
-      const initMax = f.mean + 2 * f.std;
-      vminInput.min = String(f.vmin);
-      vminInput.max = String(f.vmax);
-      vmaxInput.min = String(f.vmin);
-      vmaxInput.max = String(f.vmax);
-      const step = (f.vmax - f.vmin) / 1000;
-      vminInput.step = String(step);
-      vmaxInput.step = String(step);
-      vminInput.value = String(initMin);
-      vmaxInput.value = String(initMax);
-    }
+    // Per-frame display ranges. Initial = mean ± std (matches the original
+    // matplotlib notebook). Mutated by drag, preserved across frame switches.
+    const frameRanges = frames.map((f) => ({
+      vmin: f.mean - 1 * f.std,
+      vmax: f.mean + 2 * f.std,
+    }));
 
     function paint() {
       const f = frames[frameIdx];
-      let vmin = parseFloat(vminInput.value);
-      let vmax = parseFloat(vmaxInput.value);
-      if (vmin >= vmax) {
-        // Re-clamp so vmin < vmax
-        const step = parseFloat(vminInput.step) || 1e-6;
-        vmin = Math.min(vmin, vmax - step);
-        vminInput.value = String(vmin);
-      }
-      vminVal.textContent = vmin.toFixed(4);
-      vmaxVal.textContent = vmax.toFixed(4);
-      renderImage(imgCanvas, f, vmin, vmax, cmapName);
-      renderHistogram(histCanvas, f, vmin, vmax, cmapName);
-      // Scale bar: length in display pixels.
+      const r = frameRanges[frameIdx];
+      // Clamp to the frame's full data range
+      r.vmin = Math.max(f.vmin, Math.min(r.vmin, f.vmax));
+      r.vmax = Math.max(f.vmin, Math.min(r.vmax, f.vmax));
+      if (r.vmin >= r.vmax) r.vmin = r.vmax - (f.vmax - f.vmin) / 1000;
+      vminVal.textContent = r.vmin.toFixed(4);
+      vmaxVal.textContent = r.vmax.toFixed(4);
+      renderImage(imgCanvas, f, r.vmin, r.vmax, cmapName);
+      renderHistogram(histCanvas, f, r.vmin, r.vmax, cmapName);
       const sbLenSrcPx = meta.scalebar_length_nm / meta.pixel_size_nm;
       const sbLenDispPx = (sbLenSrcPx / f.W) * imgCanvas.clientWidth;
       scalebarEl.style.width = `${sbLenDispPx}px`;
       scalebarLabel.textContent = `${meta.scalebar_length_nm} nm`;
     }
 
-    sliderInit();
+    // --- Histogram drag: dual-handle range. Pointer events fire inside shadow
+    // DOM; we use setPointerCapture so the drag continues even when the cursor
+    // moves off the canvas vertically (no "drop on move off horizontal line").
+    let dragging = null;  // "vmin" | "vmax" | null
+
+    function canvasXFromEvent(e) {
+      const rect = histCanvas.getBoundingClientRect();
+      return ((e.clientX - rect.left) / rect.width) * histCanvas.width;
+    }
+    function valueFromX(x) {
+      const f = frames[frameIdx];
+      const t = Math.max(0, Math.min(1, x / histCanvas.width));
+      return f.vmin + t * (f.vmax - f.vmin);
+    }
+    function xFromValue(v) {
+      const f = frames[frameIdx];
+      return ((v - f.vmin) / (f.vmax - f.vmin)) * histCanvas.width;
+    }
+
+    histCanvas.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      const x = canvasXFromEvent(e);
+      const r = frameRanges[frameIdx];
+      // Pick whichever handle is closer to the click.
+      const dMin = Math.abs(x - xFromValue(r.vmin));
+      const dMax = Math.abs(x - xFromValue(r.vmax));
+      dragging = dMin <= dMax ? "vmin" : "vmax";
+      histCanvas.setPointerCapture(e.pointerId);
+      applyDrag(x);
+    });
+    histCanvas.addEventListener("pointermove", (e) => {
+      if (!dragging) return;
+      applyDrag(canvasXFromEvent(e));
+    });
+    const endDrag = (e) => {
+      if (!dragging) return;
+      dragging = null;
+      try { histCanvas.releasePointerCapture(e.pointerId); } catch (_) {}
+    };
+    histCanvas.addEventListener("pointerup", endDrag);
+    histCanvas.addEventListener("pointercancel", endDrag);
+
+    function applyDrag(x) {
+      const f = frames[frameIdx];
+      const r = frameRanges[frameIdx];
+      const eps = (f.vmax - f.vmin) / 1000;
+      const v = valueFromX(x);
+      if (dragging === "vmin") r.vmin = Math.min(v, r.vmax - eps);
+      else if (dragging === "vmax") r.vmax = Math.max(v, r.vmin + eps);
+      paint();
+    }
+
     paint();
 
     frameSel.addEventListener("change", () => {
       frameIdx = parseInt(frameSel.value, 10);
-      sliderInit();
-      paint();
+      paint();  // uses frameRanges[frameIdx] — preserved across switches
     });
     cmapSel.addEventListener("change", () => { cmapName = cmapSel.value; paint(); });
-    vminInput.addEventListener("input", paint);
-    vmaxInput.addEventListener("input", paint);
     scalebarToggle.addEventListener("change", () => {
       const v = scalebarToggle.checked ? "block" : "none";
       scalebarEl.style.display = v;

@@ -70,7 +70,7 @@ We reference [](#fig_EWR_graphene_interactive) in the same manner as before.
 
 ## Showing images without compute
 
-The widget above runs a Python kernel in the reader's browser. A second option is to skip Python entirely and build the same controls in JavaScript — the page then loads instantly and works offline, at the cost of being limited to what JS can do. [Figure 1.10](#fig_EWR_graphene_anywidget) shows the same exit wave reconstruction this way, using [anywidget](https://anywidget.dev).
+The widget above runs a Python kernel in the reader's browser. A second option is to skip Python entirely and build the same controls in JavaScript — the page then loads instantly and works offline, at the cost of being limited to what JS can do. [Figure 1.5](#fig_EWR_graphene_anywidget) shows the same exit wave reconstruction this way, using [anywidget](https://anywidget.dev).
 
 (fig_EWR_graphene_anywidget)=
 :::{anywidget} ./widgets/interactive-image.js
@@ -80,5 +80,5 @@ The widget above runs a Python kernel in the reader's browser. A second option i
 }
 :::
 
-**Figure 1.10.** Exit wave reconstruction of a single-layer graphene GB, from HRTEM focal series. Adapted from {cite:t}`ophus2016automatic`.
+**Figure 1.5.** Exit wave reconstruction of a single-layer graphene GB, from HRTEM focal series. Adapted from {cite:t}`ophus2016automatic`.
 
