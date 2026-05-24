@@ -12,6 +12,18 @@ To overcome these limitations, we can embed interactive 3D visualization librari
 
 :::::{tab-set}
 
+::::{tab-item} Volume Rendering
+:sync: tabmovie2
+
+:::{figure} #app:interactive_volume_rendering
+:name: fig_volume_rendering
+:placeholder: ./figures/volume_rendering.png
+Joint ptychographic-tomographic reconstruction of a simulated CNT with a missing wedge of 60 deg.
+Reproduced from{cite:p}`varnavides2024iterative`.
+:::
+
+::::
+
 ::::{tab-item} Volume Slicing
 :sync: tabmovie1
 
@@ -24,36 +36,11 @@ Reproduced from{cite:p}`varnavides2024iterative`.
 
 ::::
 
-::::{tab-item} Volume Rendering
-:sync: tabmovie2
-
-:::{figure} #app:interactive_volume_rendering
-:name: fig_volume_rendering
-:placeholder: ./figures/volume_rendering.png
-Joint ptychographic-tomographic reconstruction of a simulated CNT with a missing wedge of 60 deg. 
-Reproduced from{cite:p}`varnavides2024iterative`.
-:::
-
-::::
-
 :::::
 
 ## 3D plots without compute
 
-The kernel-backed widgets above use matplotlib (slicing) and k3d (volume rendering). The same data can be explored in pure JavaScript: [](#fig_volume_slicing_anywidget) shows an ImageJ-style orthoview where clicking any panel moves the slice positions of the other two, and [](#fig_volume_rendering_anywidget) ray-casts the volume directly in the browser canvas with drag-to-orbit and wheel-to-zoom.
-
-::::{figure}
-:name: fig_volume_slicing_anywidget
-
-:::{anywidget} ./widgets/interactive-volume-slicing.js
-{
-  "data_url": "../widgets/data/interactive_volume.bin",
-  "meta_url": "../widgets/data/interactive_volume.json"
-}
-:::
-
-Same reconstruction as [](#fig_volume_slicing), shown as three linked orthogonal slices. Click any panel to set the crosshair, drag a slice slider for fine control, or drag the histogram handles to tighten the display range.
-::::
+The kernel-backed widgets above use k3d for volume rendering and matplotlib for slicing. The same data can be explored in pure JavaScript without a Python kernel: [](#fig_volume_rendering_anywidget) ray-casts the volume directly on the GPU via WebGL, and [](#fig_volume_slicing_anywidget) draws the three orthogonal slice planes as textured quads with depth testing so they occlude each other correctly at the intersection lines.
 
 ::::{figure}
 :name: fig_volume_rendering_anywidget
@@ -65,5 +52,18 @@ Same reconstruction as [](#fig_volume_slicing), shown as three linked orthogonal
 }
 :::
 
-Same reconstruction as [](#fig_volume_rendering), rendered by JS-canvas ray-casting with front-to-back alpha compositing. Drag to orbit, scroll to zoom, double-click to reset. While dragging, the resolution drops to keep the framerate up; releasing snaps back to full-quality.
+Same reconstruction as [](#fig_volume_rendering), rendered by a WebGL fragment-shader ray-march with front-to-back alpha compositing. Drag to orbit, scroll to zoom, double-click to reset. Toggle the Volume and Atom-maxima layers, or click ▶ Play for an auto-orbit.
+::::
+
+::::{figure}
+:name: fig_volume_slicing_anywidget
+
+:::{anywidget} ./widgets/interactive-volume-slicing.js
+{
+  "data_url": "../widgets/data/interactive_volume.bin",
+  "meta_url": "../widgets/data/interactive_volume.json"
+}
+:::
+
+Same reconstruction as [](#fig_volume_slicing), shown as three orthogonal slice planes intersecting in 3D. Drag to orbit, scroll to zoom, use the sliders to move the slices, or drag the histogram handles to tighten the display range.
 ::::

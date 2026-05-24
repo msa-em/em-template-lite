@@ -1,7 +1,8 @@
 // interactive-volume-rendering.js
 // AnyWidget that replicates notebooks/05.interactive_volume_rendering.ipynb
-// without a kernel. Performs JS-canvas ray-cast alpha compositing through the
-// volume, with mouse drag to rotate and wheel to zoom.
+// without a kernel. WebGL2 fragment-shader ray-march through a uint8 3D
+// texture, plus a GL POINTS pass for atom-position maxima. Drag-to-orbit,
+// wheel-to-zoom, double-click reset, plus an auto-rotate animation.
 //
 // Embed via MyST:
 //
@@ -35,9 +36,18 @@ async function loadVolume(dataUrl, metaUrl) {
   if (!metaRes.ok) throw new Error(`Failed to fetch ${metaUrl}: ${metaRes.status}`);
   const meta = await metaRes.json();
   const buf = await binRes.arrayBuffer();
-  const u8 = new Uint8Array(buf);
-  const [D0, D1, D2] = meta.shape;
-  return { vol: u8, nx: D0, ny: D1, nz: D2, meta };
+  return { vol: new Uint8Array(buf), nx: meta.shape[0], ny: meta.shape[1], nz: meta.shape[2], meta };
+}
+
+async function loadAtoms(metaUrl, atomsUrl) {
+  // metaUrl is page-relative ("../widgets/data/..."); compose the atoms URL
+  // off the same directory using a manual path-join so we don't need an
+  // absolute base URL.
+  const slash = metaUrl.lastIndexOf("/");
+  const baseDir = slash >= 0 ? metaUrl.substring(0, slash + 1) : "";
+  const r = await fetch(baseDir + atomsUrl);
+  if (!r.ok) throw new Error(`Atom file fetch ${r.status}`);
+  return new Float32Array(await r.arrayBuffer());
 }
 
 function modelGet(model, key, fallback) {
@@ -49,154 +59,18 @@ function modelGet(model, key, fallback) {
 }
 
 // ============================================================
-// Ray-cast renderer
+// Build a 256x1 RGBA texture from a colormap LUT.
 // ============================================================
-// Camera convention: orbit around the volume center (0,0,0). Volume is treated
-// as a unit-cube-sized box scaled by aspect (nx, ny, nz) / max(nx, ny, nz).
-//
-// Rotation:
-//   azimuth   (yaw)   in radians, rotation about +Y
-//   elevation (pitch) in radians, rotation about local +X
-//
-// Projection: orthographic. Each output pixel gets a parallel ray along the
-// camera's -Z axis; we ray-march the volume's intersection segment and do
-// front-to-back alpha compositing using the colormap.
-
-function makeRenderer(vol, nx, ny, nz, displayCanvas) {
-  // Half-extents of the volume box in world units (normalized to ≤ 1).
-  const M = Math.max(nx, ny, nz);
-  const hx = nx / M, hy = ny / M, hz = nz / M;
-
-  // Precomputed: for fast voxel sampling
-  const NXY = nx * ny;
-  const NX = nx;
-
-  // Off-screen canvas for low-res preview during drag, then refine.
-  let interactive = false;
-
-  function sampleNearest(wx, wy, wz) {
-    // World coords in [-h, h]; map to voxel coords [0, n-1]
-    const fx = (wx + hx) / (2 * hx) * (nx - 1);
-    const fy = (wy + hy) / (2 * hy) * (ny - 1);
-    const fz = (wz + hz) / (2 * hz) * (nz - 1);
-    if (fx < 0 || fy < 0 || fz < 0 || fx > nx - 1 || fy > ny - 1 || fz > nz - 1) return -1;
-    const ix = fx | 0, iy = fy | 0, iz = fz | 0;
-    // index(x, y, z) = z + nz*(y + ny*x)
-    return vol[iz + nz * (iy + ny * ix)];
+function buildCmapTexture(gl, cmapName) {
+  const cmap = COLORMAPS[cmapName] || COLORMAPS.gray;
+  const data = new Uint8Array(256 * 4);
+  for (let i = 0; i < 256; i++) {
+    data[i * 4]     = cmap[i * 3];
+    data[i * 4 + 1] = cmap[i * 3 + 1];
+    data[i * 4 + 2] = cmap[i * 3 + 2];
+    data[i * 4 + 3] = 255;
   }
-
-  function intersectBox(ox, oy, oz, dx, dy, dz) {
-    // Slab method, AABB [-hx, hx] x [-hy, hy] x [-hz, hz]
-    let tmin = -Infinity, tmax = Infinity;
-    if (Math.abs(dx) > 1e-12) {
-      const t1 = (-hx - ox) / dx, t2 = (hx - ox) / dx;
-      tmin = Math.max(tmin, Math.min(t1, t2));
-      tmax = Math.min(tmax, Math.max(t1, t2));
-    } else if (ox < -hx || ox > hx) return null;
-    if (Math.abs(dy) > 1e-12) {
-      const t1 = (-hy - oy) / dy, t2 = (hy - oy) / dy;
-      tmin = Math.max(tmin, Math.min(t1, t2));
-      tmax = Math.min(tmax, Math.max(t1, t2));
-    } else if (oy < -hy || oy > hy) return null;
-    if (Math.abs(dz) > 1e-12) {
-      const t1 = (-hz - oz) / dz, t2 = (hz - oz) / dz;
-      tmin = Math.max(tmin, Math.min(t1, t2));
-      tmax = Math.min(tmax, Math.max(t1, t2));
-    } else if (oz < -hz || oz > hz) return null;
-    if (tmax < tmin || tmax < 0) return null;
-    return [Math.max(0, tmin), tmax];
-  }
-
-  function renderFrame(opts) {
-    const { azimuth, elevation, zoom, cmapName, vmin, vmax, alpha, samples, outW, outH } = opts;
-    const W = outW, H = outH;
-    displayCanvas.width = W;
-    displayCanvas.height = H;
-    const ctx = displayCanvas.getContext("2d");
-    const img = ctx.createImageData(W, H);
-    const px = img.data;
-    const cmap = COLORMAPS[cmapName] || COLORMAPS.gray;
-
-    // Build camera basis from azimuth (orbit around +Y) and elevation
-    // (camera height). Camera position (unit-distance) is:
-    //   cam = ( cos(el)*sin(az),  sin(el),  cos(el)*cos(az) )
-    // Forward = origin - cam = -cam (camera looks at the origin).
-    const ca = Math.cos(azimuth), sa = Math.sin(azimuth);
-    const ce = Math.cos(elevation), se = Math.sin(elevation);
-    const fwdX = -sa * ce;
-    const fwdY = -se;
-    const fwdZ = -ca * ce;
-    // Right axis (camera +X) = world axis rotated by azimuth only.
-    const rightX = ca, rightY = 0, rightZ = -sa;
-    // Up = right × fwd (right-handed)
-    const upX = rightY * fwdZ - rightZ * fwdY;
-    const upY = rightZ * fwdX - rightX * fwdZ;
-    const upZ = rightX * fwdY - rightY * fwdX;
-
-    // Orthographic view plane covers world-space side = 1.4 (volume max half ~= 1, plus margin) / zoom.
-    const halfExtent = 1.4 / zoom;
-    const aspect = W / H;
-
-    const displaySpan = vmax - vmin || 1;
-    const alphaScale = alpha;
-
-    // For each output pixel, build a ray and march.
-    for (let yi = 0; yi < H; yi++) {
-      const v = (1 - (yi + 0.5) / H) * 2 - 1;  // [-1, 1] top to bottom = +up
-      for (let xi = 0; xi < W; xi++) {
-        const u = ((xi + 0.5) / W) * 2 - 1;    // [-1, 1] left to right = +right
-        // Ray origin: camera-plane point projected back along -fwd
-        const px0 = u * halfExtent * aspect * rightX + v * halfExtent * upX;
-        const py0 = u * halfExtent * aspect * rightY + v * halfExtent * upY;
-        const pz0 = u * halfExtent * aspect * rightZ + v * halfExtent * upZ;
-        const ox = px0 - fwdX * 2;
-        const oy = py0 - fwdY * 2;
-        const oz = pz0 - fwdZ * 2;
-        const hit = intersectBox(ox, oy, oz, fwdX, fwdY, fwdZ);
-        const j = (yi * W + xi) * 4;
-        if (!hit) {
-          px[j] = px[j + 1] = px[j + 2] = 0; px[j + 3] = 0;
-          continue;
-        }
-        const [tStart, tEnd] = hit;
-        const segLen = tEnd - tStart;
-        const ds = segLen / samples;
-        let accR = 0, accG = 0, accB = 0, accA = 0;
-        for (let s = 0; s < samples; s++) {
-          const t = tStart + (s + 0.5) * ds;
-          const wx = ox + fwdX * t;
-          const wy = oy + fwdY * t;
-          const wz = oz + fwdZ * t;
-          const sample = sampleNearest(wx, wy, wz);
-          if (sample < 0) continue;
-          let nv = (sample - vmin) / displaySpan;
-          if (nv <= 0) continue;
-          if (nv > 1) nv = 1;
-          // Sample alpha proportional to value, scaled by user-controlled alpha.
-          // 1 - (1-a)^ds adjusts for varying step size when zoom changes.
-          // Beer-Lambert absorption: density ~ nv * alphaScale; the *10 baseline
-          // makes α=1 give sensible visibility for sparse tomography data.
-          const alphaSample = 1 - Math.exp(-nv * alphaScale * 10 * ds);
-          if (alphaSample <= 0) continue;
-          const ci = (nv * 255) | 0;
-          const o = ci * 3;
-          const oneMinusA = 1 - accA;
-          accR += oneMinusA * alphaSample * cmap[o];
-          accG += oneMinusA * alphaSample * cmap[o + 1];
-          accB += oneMinusA * alphaSample * cmap[o + 2];
-          accA += oneMinusA * alphaSample;
-          if (accA >= 0.995) break;
-        }
-        px[j]     = accR;
-        px[j + 1] = accG;
-        px[j + 2] = accB;
-        px[j + 3] = Math.round(accA * 255);
-      }
-    }
-    ctx.putImageData(img, 0, 0);
-  }
-
-  return { renderFrame };
+  return data;
 }
 
 // ============================================================
@@ -206,26 +80,24 @@ function render({ model, el }) {
   const dataUrl = modelGet(model, "data_url", "./widgets/data/interactive_volume.bin");
   const metaUrl = modelGet(model, "meta_url", "./widgets/data/interactive_volume.json");
   const id = "ivr_" + Math.random().toString(36).slice(2, 8);
-
-  const CANVAS_PX_HI = 400;   // resolution when idle
-  const CANVAS_PX_LO = 200;   // resolution while interacting (drag / wheel)
+  const CANVAS_PX = 400;
 
   el.innerHTML = `
     <style>
       .${id}-wrap { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #888; font-size: 13px; line-height: 1.4; }
       .${id}-row { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
-      .${id}-colorbar-wrap { position: relative; height: ${CANVAS_PX_HI}px; width: 42px; flex-shrink: 0; }
+      .${id}-colorbar-wrap { position: relative; height: ${CANVAS_PX}px; width: 42px; flex-shrink: 0; }
       .${id}-colorbar-canvas { display: block; width: 12px; height: 100%; border-radius: 2px; position: absolute; right: 0; top: 0; }
       .${id}-cb-tick { position: absolute; right: 18px; font-size: 10px; color: #888; font-variant-numeric: tabular-nums; white-space: nowrap; line-height: 1; transform: translateY(-50%); text-align: right; }
       .${id}-cb-tick::before { content: ''; position: absolute; right: -5px; top: 50%; width: 4px; height: 1px; background: currentColor; }
-      .${id}-canvas-box { position: relative; width: ${CANVAS_PX_HI}px; height: ${CANVAS_PX_HI}px; background: #000; border-radius: 6px; flex-shrink: 0; touch-action: none; user-select: none; }
-      .${id}-canvas { display: block; width: 100%; height: 100%; image-rendering: pixelated; cursor: grab; border-radius: 6px; }
+      .${id}-canvas-box { position: relative; width: ${CANVAS_PX}px; height: ${CANVAS_PX}px; background: #000; border-radius: 6px; flex-shrink: 0; touch-action: none; user-select: none; }
+      .${id}-canvas { display: block; width: 100%; height: 100%; cursor: grab; border-radius: 6px; }
       .${id}-canvas-box.${id}-dragging .${id}-canvas { cursor: grabbing; }
       .${id}-reset { position: absolute; top: 8px; right: 8px; background: rgba(0,0,0,0.55); color: #fff; border: none; padding: 4px 10px; border-radius: 4px; font-size: 12px; cursor: pointer; font-family: inherit; }
       .${id}-reset:hover { background: rgba(0,0,0,0.75); }
       .${id}-help-wrap { position: absolute; bottom: 8px; right: 8px; }
       .${id}-help-btn { background: rgba(0,0,0,0.55); color: #fff; padding: 4px 10px; border-radius: 4px; font-size: 12px; cursor: help; user-select: none; }
-      .${id}-help-tip { display: none; position: absolute; bottom: calc(100% + 6px); right: 0; background: rgba(0,0,0,0.92); color: #fff; padding: 10px 12px; border-radius: 4px; font-size: 12px; line-height: 1.6; width: 220px; white-space: normal; pointer-events: none; }
+      .${id}-help-tip { display: none; position: absolute; bottom: calc(100% + 6px); right: 0; background: rgba(0,0,0,0.92); color: #fff; padding: 10px 12px; border-radius: 4px; font-size: 12px; line-height: 1.6; width: 220px; pointer-events: none; }
       .${id}-help-wrap:hover .${id}-help-tip { display: block; }
       .${id}-angle-readout { position: absolute; bottom: 8px; left: 8px; color: #fff; font-size: 11px; font-family: ui-monospace, monospace; text-shadow: 0 0 3px #000, 0 0 3px #000; pointer-events: none; font-variant-numeric: tabular-nums; }
       .${id}-controls { display: flex; flex-direction: column; gap: 12px; width: 210px; flex-shrink: 0; }
@@ -235,13 +107,14 @@ function render({ model, el }) {
       .${id}-ctrl-inline { display: flex; align-items: center; gap: 8px; font-size: 12px; cursor: pointer; color: #888; }
       .${id}-slider { width: 100%; margin: 0; }
       .${id}-slider-row { display: flex; justify-content: space-between; font-size: 11px; color: #888; font-variant-numeric: tabular-nums; }
-      .${id}-loading { padding: 20px; color: #888; font-size: 13px; }
       .${id}-pb-buttons { display: flex; gap: 4px; align-items: center; }
       .${id}-pb-btn { background: transparent; border: 1px solid #bbb; color: inherit; padding: 3px 8px; border-radius: 4px; font-size: 11px; cursor: pointer; font-family: inherit; line-height: 1.2; }
       .${id}-pb-btn:hover { background: rgba(128,128,128,0.12); }
       .${id}-pb-btn.${id}-active { background: rgba(60,140,80,0.18); border-color: rgb(60,140,80); color: rgb(40,110,60); }
       .${id}-pb-play-btn { flex: 1; min-width: 0; }
       .${id}-pb-counter { font-size: 11px; color: #888; font-variant-numeric: tabular-nums; min-width: 50px; text-align: right; }
+      .${id}-loading { padding: 20px; color: #888; font-size: 13px; }
+      .${id}-error { padding: 16px; color: #c33; font-family: monospace; font-size: 12px; }
     </style>
     <div class="${id}-wrap">
       <div class="${id}-loading">Loading volume…</div>
@@ -250,19 +123,26 @@ function render({ model, el }) {
   const wrap = el.querySelector(`.${id}-wrap`);
 
   loadVolume(dataUrl, metaUrl).then(async ({ vol, nx, ny, nz, meta }) => {
+    // Try to load atom positions. Optional.
+    let atoms = null;
+    if (meta.atoms_url) {
+      try { atoms = await loadAtoms(metaUrl, meta.atoms_url); }
+      catch (_) { atoms = null; }
+    }
+
     wrap.innerHTML = `
       <div class="${id}-row">
         <div class="${id}-colorbar-wrap">
-          <canvas class="${id}-colorbar-canvas" width="12" height="${CANVAS_PX_HI}"></canvas>
+          <canvas class="${id}-colorbar-canvas" width="12" height="${CANVAS_PX}"></canvas>
         </div>
         <div class="${id}-canvas-box">
-          <canvas class="${id}-canvas" width="${CANVAS_PX_HI}" height="${CANVAS_PX_HI}"></canvas>
+          <canvas class="${id}-canvas" width="${CANVAS_PX}" height="${CANVAS_PX}"></canvas>
           <button class="${id}-reset" type="button" title="Reset view, range, opacity, and colormap">Reset</button>
           <div class="${id}-angle-readout"></div>
           <div class="${id}-help-wrap">
             <div class="${id}-help-btn">Controls</div>
             <div class="${id}-help-tip">
-              <strong>Left drag</strong>: orbit (azimuth + elevation)<br>
+              <strong>Left drag</strong>: orbit<br>
               <strong>Wheel</strong>: zoom in / out<br>
               <strong>Double click</strong>: reset everything
             </div>
@@ -272,15 +152,15 @@ function render({ model, el }) {
           <div class="${id}-ctrl">
             <div class="${id}-section-label">Layers</div>
             <label class="${id}-ctrl-inline"><input class="${id}-show-volume" type="checkbox" checked/> Volume</label>
-            <label class="${id}-ctrl-inline"><input class="${id}-show-atoms" type="checkbox"/> Atom maxima ${meta.n_atoms ? `(${meta.n_atoms})` : ""}</label>
+            <label class="${id}-ctrl-inline"><input class="${id}-show-atoms" type="checkbox"/> Atom maxima ${atoms ? `(${atoms.length / 3})` : "(unavailable)"}</label>
           </div>
           <div class="${id}-ctrl">
             <div class="${id}-section-label">Auto-rotate</div>
             <div class="${id}-pb-buttons">
               <button class="${id}-pb-btn ${id}-pb-play-btn" type="button" title="Play / pause auto-rotation">▶ Play</button>
-              <span class="${id}-pb-counter ${id}-pb-fps-val">10 fps</span>
+              <span class="${id}-pb-counter ${id}-pb-fps-val">15 fps</span>
             </div>
-            <input class="${id}-slider ${id}-fps" type="range" min="1" max="60" step="1" value="10" title="Rotation speed"/>
+            <input class="${id}-slider ${id}-fps" type="range" min="1" max="60" step="1" value="15" title="Rotation speed"/>
           </div>
           <div class="${id}-ctrl">
             <div class="${id}-section-label">Opacity</div>
@@ -305,8 +185,8 @@ function render({ model, el }) {
       </div>`;
 
     const $ = (sel) => wrap.querySelector(sel);
-    const canvasBox = $(`.${id}-canvas-box`);
     const canvas = $(`.${id}-canvas`);
+    const canvasBox = $(`.${id}-canvas-box`);
     const colorbarCanvas = $(`.${id}-colorbar-canvas`);
     const colorbarWrap = $(`.${id}-colorbar-wrap`);
     const angleEl = $(`.${id}-angle-readout`);
@@ -324,19 +204,248 @@ function render({ model, el }) {
     const fpsSlider = $(`.${id}-fps`);
     const fpsValEl = $(`.${id}-pb-fps-val`);
 
-    const renderer = makeRenderer(vol, nx, ny, nz, canvas);
-
-    // Try to load atom-position list. Optional — if missing, the checkbox
-    // stays available but renders nothing.
-    let atoms = null;  // Float32Array of length 3N: x0,y0,z0, x1,y1,z1, ...
-    if (meta.atoms_url) {
-      try {
-        const atomsUrl = new URL(meta.atoms_url, metaUrl).href;
-        const r = await fetch(atomsUrl);
-        if (r.ok) atoms = new Float32Array(await r.arrayBuffer());
-      } catch (_) { /* keep atoms = null */ }
+    // ---- WebGL2 setup ----
+    const gl = canvas.getContext("webgl2", { antialias: true, premultipliedAlpha: false });
+    if (!gl) {
+      wrap.innerHTML = `<div class="${id}-error">WebGL2 is required for this volume renderer but is not available in this browser. Try a recent Chrome, Firefox, or Safari 15+.</div>`;
+      return;
     }
 
+    function compile(src, type) {
+      const s = gl.createShader(type);
+      gl.shaderSource(s, src); gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+        const log = gl.getShaderInfoLog(s);
+        throw new Error("Shader compile error: " + log + "\nSource:\n" + src);
+      }
+      return s;
+    }
+    function linkProg(vsSrc, fsSrc) {
+      const p = gl.createProgram();
+      gl.attachShader(p, compile(vsSrc, gl.VERTEX_SHADER));
+      gl.attachShader(p, compile(fsSrc, gl.FRAGMENT_SHADER));
+      gl.linkProgram(p);
+      if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+        throw new Error("Program link error: " + gl.getProgramInfoLog(p));
+      }
+      return p;
+    }
+
+    // Volume ray-march shader: full-screen quad, fragment shader does the
+    // intersection + march. Same Beer-Lambert formula as the JS version, but
+    // running 60 fps even at 400x400.
+    const VS_VOLUME = `#version 300 es
+in vec2 a_pos;
+out vec2 v_screen;
+void main() {
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+  v_screen = a_pos;
+}`;
+    const FS_VOLUME = `#version 300 es
+precision highp float;
+precision highp sampler3D;
+in vec2 v_screen;
+uniform sampler3D u_vol;
+uniform sampler2D u_cmap;
+uniform vec3  u_hsize;     // half-extents of the volume box in world units
+uniform vec3  u_camera;    // camera position (world)
+uniform vec3  u_right;
+uniform vec3  u_up;
+uniform vec3  u_fwd;
+uniform float u_halfExtent;
+uniform float u_alpha;
+uniform float u_vmin;
+uniform float u_vmax;
+out vec4 outColor;
+const int SAMPLES = 96;
+
+bool boxIntersect(vec3 ro, vec3 rd, vec3 h, out float tNear, out float tFar) {
+  vec3 inv = 1.0 / rd;
+  vec3 t0 = (-h - ro) * inv;
+  vec3 t1 = ( h - ro) * inv;
+  vec3 tmin = min(t0, t1);
+  vec3 tmax = max(t0, t1);
+  tNear = max(max(tmin.x, tmin.y), tmin.z);
+  tFar  = min(min(tmax.x, tmax.y), tmax.z);
+  return tFar > tNear && tFar > 0.0;
+}
+
+void main() {
+  // Ray in world space: orthographic camera looking at origin.
+  vec3 ro = u_camera + u_right * v_screen.x * u_halfExtent
+                     + u_up    * v_screen.y * u_halfExtent;
+  vec3 rd = u_fwd;
+  float tNear, tFar;
+  if (!boxIntersect(ro, rd, u_hsize, tNear, tFar)) discard;
+  tNear = max(tNear, 0.0);
+  float segLen = tFar - tNear;
+  float ds = segLen / float(SAMPLES);
+  float span = max(u_vmax - u_vmin, 1.0/255.0);
+  vec4 acc = vec4(0.0);
+  for (int i = 0; i < SAMPLES; i++) {
+    float t = tNear + (float(i) + 0.5) * ds;
+    vec3 worldPos = ro + rd * t;
+    vec3 tex = (worldPos / u_hsize + 1.0) * 0.5;
+    float v = texture(u_vol, tex).r * 255.0;
+    float nv = clamp((v - u_vmin) / span, 0.0, 1.0);
+    if (nv > 0.0) {
+      float alphaSample = 1.0 - exp(-nv * u_alpha * 10.0 * ds);
+      vec3 col = texture(u_cmap, vec2(nv, 0.5)).rgb;
+      acc.rgb += (1.0 - acc.a) * alphaSample * col;
+      acc.a   += (1.0 - acc.a) * alphaSample;
+      if (acc.a > 0.995) break;
+    }
+  }
+  if (acc.a < 0.001) discard;
+  outColor = acc;
+}`;
+    const progVolume = linkProg(VS_VOLUME, FS_VOLUME);
+
+    // Atom point-cloud shader.
+    const VS_ATOMS = `#version 300 es
+in vec3 a_pos;       // voxel-space coords
+uniform vec3 u_volSize;     // (nx, ny, nz) for normalizing voxel coords
+uniform vec3 u_hsize;
+uniform vec3 u_camera;
+uniform vec3 u_right;
+uniform vec3 u_up;
+uniform vec3 u_fwd;
+uniform float u_halfExtent;
+uniform float u_pointSize;
+void main() {
+  // Voxel coords -> world coords in [-h, +h]
+  vec3 norm = a_pos / (u_volSize - 1.0);
+  vec3 world = (norm * 2.0 - 1.0) * u_hsize;
+  // Orthographic projection (consistent with volume shader)
+  vec3 rel = world - u_camera;
+  float u_ = dot(rel, u_right) / u_halfExtent;
+  float v_ = dot(rel, u_up) / u_halfExtent;
+  float d  = dot(rel, u_fwd);
+  // Normalize depth into [-1, 1] over a reasonable range
+  gl_Position = vec4(u_, v_, d * 0.1, 1.0);
+  gl_PointSize = u_pointSize;
+}`;
+    const FS_ATOMS = `#version 300 es
+precision highp float;
+out vec4 outColor;
+void main() {
+  vec2 q = gl_PointCoord * 2.0 - 1.0;
+  float r = dot(q, q);
+  if (r > 1.0) discard;
+  // Anti-aliased disc; slight cyan to read against magma backdrop
+  float a = smoothstep(1.0, 0.7, r);
+  outColor = vec4(0.4, 0.85, 1.0, a);
+}`;
+    const progAtoms = linkProg(VS_ATOMS, FS_ATOMS);
+
+    // Full-screen quad VBO (two triangles)
+    const quadVbo = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadVbo);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1,  1, -1,  -1, 1,  1, 1]), gl.STATIC_DRAW);
+
+    // Atom VBO
+    let atomVbo = null;
+    if (atoms) {
+      atomVbo = gl.createBuffer();
+      gl.bindBuffer(gl.ARRAY_BUFFER, atomVbo);
+      gl.bufferData(gl.ARRAY_BUFFER, atoms, gl.STATIC_DRAW);
+    }
+
+    // 3D volume texture
+    const volTex = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_3D, volTex);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_3D, gl.TEXTURE_WRAP_R, gl.CLAMP_TO_EDGE);
+    gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    // Volume layout in JS: index(x, y, z) = z + nz*(y + ny*x). For
+    // gl.texImage3D the stride is width=fastest. We pass the data as if the
+    // texture has dims (nz, ny, nx) with WIDTH=nz; then sampling at (x, y, z)
+    // becomes texture(volTex, vec3(z, y, x) / dims). We compensate by swapping
+    // the sample coord components in the shader — or, equivalently, by
+    // mapping `tex` to (tz, ty, tx) instead of (tx, ty, tz) below.
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8, nz, ny, nx, 0, gl.RED, gl.UNSIGNED_BYTE, vol);
+
+    // Colormap texture (256x1 RGBA), refreshed when cmap changes.
+    const cmapTex = gl.createTexture();
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, cmapTex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    function uploadCmap(name) {
+      const data = buildCmapTexture(gl, name);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, cmapTex);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+    }
+    uploadCmap("magma");
+
+    // Uniform locations
+    const uVol = {
+      vol:        gl.getUniformLocation(progVolume, "u_vol"),
+      cmap:       gl.getUniformLocation(progVolume, "u_cmap"),
+      hsize:      gl.getUniformLocation(progVolume, "u_hsize"),
+      camera:     gl.getUniformLocation(progVolume, "u_camera"),
+      right:      gl.getUniformLocation(progVolume, "u_right"),
+      up:         gl.getUniformLocation(progVolume, "u_up"),
+      fwd:        gl.getUniformLocation(progVolume, "u_fwd"),
+      halfExtent: gl.getUniformLocation(progVolume, "u_halfExtent"),
+      alpha:      gl.getUniformLocation(progVolume, "u_alpha"),
+      vmin:       gl.getUniformLocation(progVolume, "u_vmin"),
+      vmax:       gl.getUniformLocation(progVolume, "u_vmax"),
+    };
+    const aVolPos = gl.getAttribLocation(progVolume, "a_pos");
+    const uAtm = {
+      volSize:    gl.getUniformLocation(progAtoms, "u_volSize"),
+      hsize:      gl.getUniformLocation(progAtoms, "u_hsize"),
+      camera:     gl.getUniformLocation(progAtoms, "u_camera"),
+      right:      gl.getUniformLocation(progAtoms, "u_right"),
+      up:         gl.getUniformLocation(progAtoms, "u_up"),
+      fwd:        gl.getUniformLocation(progAtoms, "u_fwd"),
+      halfExtent: gl.getUniformLocation(progAtoms, "u_halfExtent"),
+      pointSize:  gl.getUniformLocation(progAtoms, "u_pointSize"),
+    };
+    const aAtomsPos = gl.getAttribLocation(progAtoms, "a_pos");
+
+    // Half-extents (normalized so max axis = 1)
+    const Mdim = Math.max(nx, ny, nz);
+    const hx = nx / Mdim, hy = ny / Mdim, hz = nz / Mdim;
+    // Note on shader's u_hsize: the volume texture is uploaded with dims
+    // (nz, ny, nx) — width fastest. So sampling needs `vec3(tz, ty, tx)`.
+    // We achieve that by swapping x/z components in the shader's `tex`
+    // coordinate. Easier: pass u_hsize as (hz, hy, hx) and use worldPos.zyx
+    // for the texture lookup? Let's keep it transparent by computing the
+    // swap right here: the shader treats hsize as world half-extents in
+    // (X, Y, Z) ordering, and we'll do the index swap in the texture lookup
+    // inline. Actually our current shader uses worldPos / u_hsize directly
+    // as tex coords — which only works if u_hsize matches the texture axes.
+    // To avoid changing the shader twice, just upload the volume in the
+    // expected order: gl.texImage3D(... nx, ny, nz ...) with row-major where
+    // x is fastest. JS data has z fastest, so we'd need to repack. Cheapest:
+    // repack once at load (small cost vs runtime).
+
+    // Repack: JS layout has (x, y, z) order with z fastest; we want
+    // x-fastest for GL. Do it once here:
+    const repacked = new Uint8Array(nx * ny * nz);
+    for (let xi = 0; xi < nx; xi++) {
+      for (let yi = 0; yi < ny; yi++) {
+        for (let zi = 0; zi < nz; zi++) {
+          const src = zi + nz * (yi + ny * xi);     // JS layout
+          const dst = xi + nx * (yi + ny * zi);     // GL layout (x fastest, z slowest)
+          repacked[dst] = vol[src];
+        }
+      }
+    }
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_3D, volTex);
+    gl.texImage3D(gl.TEXTURE_3D, 0, gl.R8, nx, ny, nz, 0, gl.RED, gl.UNSIGNED_BYTE, repacked);
+
+    // ---- State ----
     const state = {
       azimuth: Math.PI * 0.25,
       elevation: Math.PI * 0.15,
@@ -349,53 +458,31 @@ function render({ model, el }) {
       showAtoms: false,
     };
     const DEFAULTS = JSON.parse(JSON.stringify(state));
-    // Auto-rotate state (not persisted across resets in the obvious way —
-    // resetAll stops rotation and resets fps to default).
-    const ROTATE_DEFAULTS = { playing: false, fps: 10, deg_per_frame: 1 };
+    const ROTATE_DEFAULTS = { playing: false, fps: 15, deg_per_frame: 1 };
     let autoRotate = { ...ROTATE_DEFAULTS };
     let rotateRafId = null;
     let lastRotateTime = 0;
 
-    let renderHandle = null;
-    function scheduleRender(interactive) {
-      if (renderHandle) cancelAnimationFrame(renderHandle);
-      renderHandle = requestAnimationFrame(() => {
-        renderHandle = null;
-        doRender(interactive);
-      });
-    }
-    // Always render at full resolution; only the sample count changes during
-    // interaction. Keeping the canvas size constant means the displayed
-    // smoothness is consistent rather than visibly mip-jumping on release.
-    const SAMPLES_HI = 96;
-    const SAMPLES_LO = 32;
-    function doRender(interactive) {
-      const ctx = canvas.getContext("2d");
-      if (state.showVolume) {
-        renderer.renderFrame({
-          azimuth: state.azimuth, elevation: state.elevation, zoom: state.zoom,
-          cmapName: state.cmapName, vmin: state.vmin, vmax: state.vmax,
-          alpha: state.alpha,
-          samples: interactive ? SAMPLES_LO : SAMPLES_HI,
-          outW: CANVAS_PX_HI, outH: CANVAS_PX_HI,
-        });
-      } else {
-        // Volume disabled: clear to dark background so atoms (if any) read clean.
-        canvas.width = CANVAS_PX_HI;
-        canvas.height = CANVAS_PX_HI;
-        ctx.fillStyle = "#000";
-        ctx.fillRect(0, 0, CANVAS_PX_HI, CANVAS_PX_HI);
-      }
-      if (state.showAtoms && atoms) drawAtoms(ctx);
-      angleEl.textContent = `az ${(state.azimuth * 180 / Math.PI).toFixed(0)}° · el ${(state.elevation * 180 / Math.PI).toFixed(0)}° · zoom ${state.zoom.toFixed(2)}×`;
-      renderColorbar();
+    // ---- Render ----
+    let rafHandle = null;
+    function scheduleRender() {
+      if (rafHandle) return;
+      rafHandle = requestAnimationFrame(() => { rafHandle = null; draw(); });
     }
 
-    function drawAtoms(ctx) {
-      // Project each (x, y, z) atom voxel coord to screen using the same camera
-      // basis as the volume renderer. Voxel coords -> world coords -> orthographic
-      // projection. Draw a small circle, sorted by depth so back atoms are
-      // overdrawn by front ones.
+    function draw() {
+      // DPR-aware sizing
+      const dpr = window.devicePixelRatio || 1;
+      const W = Math.round(CANVAS_PX * dpr);
+      const H = Math.round(CANVAS_PX * dpr);
+      if (canvas.width !== W || canvas.height !== H) {
+        canvas.width = W; canvas.height = H;
+      }
+      gl.viewport(0, 0, W, H);
+      gl.clearColor(0, 0, 0, 1);
+      gl.clear(gl.COLOR_BUFFER_BIT);
+
+      // Camera basis
       const ca = Math.cos(state.azimuth), sa = Math.sin(state.azimuth);
       const ce = Math.cos(state.elevation), se = Math.sin(state.elevation);
       const fwdX = -sa * ce, fwdY = -se, fwdZ = -ca * ce;
@@ -403,37 +490,56 @@ function render({ model, el }) {
       const upX = rightY * fwdZ - rightZ * fwdY;
       const upY = rightZ * fwdX - rightX * fwdZ;
       const upZ = rightX * fwdY - rightY * fwdX;
-      const M = Math.max(nx, ny, nz);
-      const hx = nx / M, hy = ny / M, hz = nz / M;
+      const camDist = 4.0;
+      const camX = -fwdX * camDist;
+      const camY = -fwdY * camDist;
+      const camZ = -fwdZ * camDist;
       const halfExtent = 1.4 / state.zoom;
-      const aspect = 1.0;
-      const W = canvas.width, H = canvas.height;
-      // Project + depth, then sort
-      const projected = new Array(atoms.length / 3);
-      for (let i = 0, k = 0; i < atoms.length; i += 3, k++) {
-        // Voxel -> world: ax in [0, nx-1] -> wx in [-hx, +hx]
-        const ax = atoms[i], ay = atoms[i + 1], az = atoms[i + 2];
-        const wx = -hx + (ax / Math.max(1, nx - 1)) * 2 * hx;
-        const wy = -hy + (ay / Math.max(1, ny - 1)) * 2 * hy;
-        const wz = -hz + (az / Math.max(1, nz - 1)) * 2 * hz;
-        const u = wx * rightX + wy * rightY + wz * rightZ;
-        const v = wx * upX + wy * upY + wz * upZ;
-        const d = wx * fwdX + wy * fwdY + wz * fwdZ;
-        const sx = ((u / (halfExtent * aspect)) + 1) * 0.5 * W;
-        const sy = (1 - ((v / halfExtent) + 1) * 0.5) * H;
-        projected[k] = [sx, sy, d];
+
+      // --- Volume pass ---
+      if (state.showVolume) {
+        gl.useProgram(progVolume);
+        gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_3D, volTex);
+        gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, cmapTex);
+        gl.uniform1i(uVol.vol, 0);
+        gl.uniform1i(uVol.cmap, 1);
+        gl.uniform3f(uVol.hsize, hx, hy, hz);
+        gl.uniform3f(uVol.camera, camX, camY, camZ);
+        gl.uniform3f(uVol.right, rightX, rightY, rightZ);
+        gl.uniform3f(uVol.up, upX, upY, upZ);
+        gl.uniform3f(uVol.fwd, fwdX, fwdY, fwdZ);
+        gl.uniform1f(uVol.halfExtent, halfExtent);
+        gl.uniform1f(uVol.alpha, state.alpha);
+        gl.uniform1f(uVol.vmin, state.vmin);
+        gl.uniform1f(uVol.vmax, state.vmax);
+        gl.bindBuffer(gl.ARRAY_BUFFER, quadVbo);
+        gl.enableVertexAttribArray(aVolPos);
+        gl.vertexAttribPointer(aVolPos, 2, gl.FLOAT, false, 0, 0);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
       }
-      projected.sort((a, b) => b[2] - a[2]);  // back to front
-      ctx.save();
-      ctx.fillStyle = "rgba(80,200,255,0.85)";
-      for (let i = 0; i < projected.length; i++) {
-        const [sx, sy] = projected[i];
-        if (sx < -2 || sy < -2 || sx > W + 2 || sy > H + 2) continue;
-        ctx.beginPath();
-        ctx.arc(sx, sy, 1.8, 0, Math.PI * 2);
-        ctx.fill();
+
+      // --- Atom point cloud pass ---
+      if (state.showAtoms && atomVbo) {
+        gl.useProgram(progAtoms);
+        gl.uniform3f(uAtm.volSize, nx, ny, nz);
+        gl.uniform3f(uAtm.hsize, hx, hy, hz);
+        gl.uniform3f(uAtm.camera, camX, camY, camZ);
+        gl.uniform3f(uAtm.right, rightX, rightY, rightZ);
+        gl.uniform3f(uAtm.up, upX, upY, upZ);
+        gl.uniform3f(uAtm.fwd, fwdX, fwdY, fwdZ);
+        gl.uniform1f(uAtm.halfExtent, halfExtent);
+        gl.uniform1f(uAtm.pointSize, 5.0 * dpr);
+        gl.enable(gl.BLEND);
+        gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+        gl.bindBuffer(gl.ARRAY_BUFFER, atomVbo);
+        gl.enableVertexAttribArray(aAtomsPos);
+        gl.vertexAttribPointer(aAtomsPos, 3, gl.FLOAT, false, 0, 0);
+        gl.drawArrays(gl.POINTS, 0, atoms.length / 3);
+        gl.disable(gl.BLEND);
       }
-      ctx.restore();
+
+      angleEl.textContent = `az ${(state.azimuth * 180 / Math.PI).toFixed(0)}° · el ${(state.elevation * 180 / Math.PI).toFixed(0)}° · zoom ${state.zoom.toFixed(2)}×`;
+      renderColorbar();
     }
 
     function renderColorbar() {
@@ -463,9 +569,7 @@ function render({ model, el }) {
       colorbarWrap.insertAdjacentHTML("beforeend", ticks.join(""));
     }
 
-    // -----------------------------------------------------------
-    // Pointer: drag to orbit. Wheel to zoom.
-    // -----------------------------------------------------------
+    // ---- Interaction ----
     let dragState = null;
     canvas.addEventListener("pointerdown", (e) => {
       if (e.button !== 0) return;
@@ -480,37 +584,27 @@ function render({ model, el }) {
       const dy = e.clientY - dragState.lastY;
       dragState.lastX = e.clientX;
       dragState.lastY = e.clientY;
-      state.azimuth   -= dx * 0.01;
-      state.elevation += dy * 0.01;
+      // Faster rotation rate per pixel of motion than the JS version.
+      state.azimuth   -= dx * 0.018;
+      state.elevation += dy * 0.018;
       state.elevation = Math.max(-1.4, Math.min(1.4, state.elevation));
-      scheduleRender(true);
+      scheduleRender();
     });
     const endDrag = (e) => {
       if (!dragState) return;
       dragState = null;
       canvasBox.classList.remove(`${id}-dragging`);
       try { canvas.releasePointerCapture(e.pointerId); } catch (_) {}
-      scheduleRender(false);
     };
     canvas.addEventListener("pointerup", endDrag);
     canvas.addEventListener("pointercancel", endDrag);
-    canvas.addEventListener("pointerleave", () => {
-      // If user lifted outside the canvas, the pointerup already fired via capture
-      // — but if not, schedule a high-res rerender as a backup.
-      if (!dragState) scheduleRender(false);
-    });
-
-    let wheelHiResTimer = null;
     canvas.addEventListener("wheel", (e) => {
       e.preventDefault();
       const factor = Math.exp(-e.deltaY * 0.001);
       state.zoom = Math.max(0.3, Math.min(5.0, state.zoom * factor));
-      scheduleRender(true);
-      if (wheelHiResTimer) clearTimeout(wheelHiResTimer);
-      wheelHiResTimer = setTimeout(() => { wheelHiResTimer = null; scheduleRender(false); }, 200);
+      scheduleRender();
     }, { passive: false });
 
-    // Double-click + Reset = full reset (also stops auto-rotate).
     function resetAll() {
       Object.assign(state, DEFAULTS);
       alphaSlider.value = String(state.alpha);
@@ -526,34 +620,23 @@ function render({ model, el }) {
       autoRotate.fps = ROTATE_DEFAULTS.fps;
       fpsSlider.value = String(autoRotate.fps);
       fpsValEl.textContent = `${autoRotate.fps} fps`;
-      scheduleRender(false);
+      uploadCmap(state.cmapName);
+      scheduleRender();
     }
     canvas.addEventListener("dblclick", (e) => { e.preventDefault(); resetAll(); });
-    resetBtn.addEventListener("click", () => resetAll());
+    resetBtn.addEventListener("click", resetAll);
 
-    // Layer checkboxes
-    showVolumeCk.addEventListener("change", () => {
-      state.showVolume = showVolumeCk.checked;
-      scheduleRender(false);
-    });
-    showAtomsCk.addEventListener("change", () => {
-      state.showAtoms = showAtomsCk.checked;
-      scheduleRender(false);
-    });
+    showVolumeCk.addEventListener("change", () => { state.showVolume = showVolumeCk.checked; scheduleRender(); });
+    showAtomsCk.addEventListener("change", () => { state.showAtoms = showAtomsCk.checked; scheduleRender(); });
 
-    // Auto-rotate: spin around the Y axis at `fps` frames per second, each
-    // frame advancing the azimuth by deg_per_frame degrees. Renders use the
-    // interactive (low-sample) path to stay smooth at higher fps; the user's
-    // explicit interactions still get the full-quality release-render.
+    // Auto-rotate
     function autoTick(now) {
       if (!autoRotate.playing) { rotateRafId = null; return; }
       const interval = 1000 / Math.max(1, autoRotate.fps);
       if (now - lastRotateTime >= interval) {
         state.azimuth -= (autoRotate.deg_per_frame * Math.PI / 180);
         lastRotateTime = now;
-        // Re-use the interactive render path; auto-rotate intentionally trades
-        // some sampling depth for smoother motion.
-        doRender(true);
+        draw();
       }
       rotateRafId = requestAnimationFrame(autoTick);
     }
@@ -571,55 +654,48 @@ function render({ model, el }) {
       playBtn.textContent = "▶ Play";
       playBtn.classList.remove(`${id}-active`);
       if (rotateRafId) { cancelAnimationFrame(rotateRafId); rotateRafId = null; }
-      // High-quality render once auto-rotate stops.
-      scheduleRender(false);
     }
-    playBtn.addEventListener("click", () => {
-      if (autoRotate.playing) stopAutoRotate(); else startAutoRotate();
-    });
+    playBtn.addEventListener("click", () => { if (autoRotate.playing) stopAutoRotate(); else startAutoRotate(); });
     fpsSlider.addEventListener("input", () => {
       autoRotate.fps = parseInt(fpsSlider.value, 10);
       fpsValEl.textContent = `${autoRotate.fps} fps`;
       lastRotateTime = performance.now();
     });
 
-    // Slider bindings
+    // Sliders — all use scheduleRender (no separate interactive path; GL is fast)
     alphaSlider.addEventListener("input", () => {
       state.alpha = parseFloat(alphaSlider.value);
       alphaVal.textContent = state.alpha.toFixed(2);
-      scheduleRender(true);
+      scheduleRender();
     });
-    alphaSlider.addEventListener("change", () => scheduleRender(false));
     vminSlider.addEventListener("input", () => {
       let v = parseInt(vminSlider.value, 10);
       if (v >= state.vmax) v = state.vmax - 1;
       state.vmin = v;
       vminSlider.value = String(v);
       vminVal.textContent = String(v);
-      scheduleRender(true);
+      scheduleRender();
     });
-    vminSlider.addEventListener("change", () => scheduleRender(false));
     vmaxSlider.addEventListener("input", () => {
       let v = parseInt(vmaxSlider.value, 10);
       if (v <= state.vmin) v = state.vmin + 1;
       state.vmax = v;
       vmaxSlider.value = String(v);
       vmaxVal.textContent = String(v);
-      scheduleRender(true);
+      scheduleRender();
     });
-    vmaxSlider.addEventListener("change", () => scheduleRender(false));
-    cmapSel.addEventListener("change", () => { state.cmapName = cmapSel.value; scheduleRender(false); });
+    cmapSel.addEventListener("change", () => {
+      state.cmapName = cmapSel.value;
+      uploadCmap(state.cmapName);
+      scheduleRender();
+    });
 
-    // Initial render
-    scheduleRender(false);
+    scheduleRender();
   }).catch(err => {
-    wrap.innerHTML = `<div style="padding: 16px; color: #c33; font-family: monospace; font-size: 12px;">Failed to load volume data:<br>${err.message}</div>`;
+    wrap.innerHTML = `<div class="${id}-error">Failed to load volume:<br>${err.message}</div>`;
   });
 }
 
-
-// Compact number formatter for colorbar ticks: 2-3 sig figs with no
-// trailing zeros, falling back to scientific for very small / large values.
 function formatTickValue(v) {
   if (v === 0) return "0";
   const a = Math.abs(v);
