@@ -199,6 +199,7 @@ function render({ model, el }) {
       .${id}-meta .${id}-meta-close:hover { opacity: 1; }
       .${id}-img-box.${id}-pan-mode .${id}-img-canvas { cursor: grab; }
       .${id}-img-box.${id}-panning .${id}-img-canvas { cursor: grabbing; }
+      .${id}-readout { display: none; position: absolute; background: rgba(0,0,0,0.85); color: #fff; padding: 3px 8px; border-radius: 3px; font-size: 11px; font-family: ui-monospace, SFMono-Regular, monospace; pointer-events: none; white-space: nowrap; z-index: 11; }
       /* Colorbar: 12 canvas + 4 gap + ~26 numeric label = 42 px column */
       .${id}-colorbar-wrap { position: relative; height: 440px; width: 42px; flex-shrink: 0; }
       .${id}-colorbar-canvas { display: block; width: 12px; height: 100%; border-radius: 2px; }
@@ -222,6 +223,8 @@ function render({ model, el }) {
           <div class="${id}-help-wrap">
             <div class="${id}-help-btn">Controls</div>
             <div class="${id}-help-tip">
+              <strong>Click</strong>: center view here<br>
+              <strong>Click &amp; hold</strong>: pixel value readout<br>
               <strong>Left drag</strong>: zoom to box (square)<br>
               <strong>Double click</strong>: reset to full view<br>
               <strong>Middle drag</strong> or <kbd>Shift</kbd>+drag: pan<br>
@@ -230,6 +233,7 @@ function render({ model, el }) {
             </div>
           </div>
           <div class="${id}-meta"></div>
+          <div class="${id}-readout"></div>
         </div>
         <div class="${id}-colorbar-wrap">
           <canvas class="${id}-colorbar-canvas" width="12" height="440"></canvas>
@@ -272,6 +276,7 @@ function render({ model, el }) {
     const metaEl = $(`.${id}-meta`);
     const colorbarCanvas = $(`.${id}-colorbar-canvas`);
     const colorbarWrap = $(`.${id}-colorbar-wrap`);
+    const readoutEl = $(`.${id}-readout`);
 
     let frameIdx = 0;
     let cmapName = "gray";
@@ -409,11 +414,27 @@ function render({ model, el }) {
     }
 
     // -----------------------------------------------------------
-    // Viewport pointer events: zoom-box, pan, wheel, contextmenu
+    // Viewport pointer events: zoom-box, pan, wheel, contextmenu,
+    // click-to-center, click-and-hold readout
+    //
+    // The pointerdown handler starts in "maybe-click" mode. After
+    // HOLD_MS without significant movement, we promote to "readout"
+    // (live pixel value tooltip). If the user instead moves, we
+    // promote to "zoom-box". On release, the resolution depends on
+    // which mode we ended up in:
+    //   maybe-click (no movement, released before HOLD_MS) -> center view
+    //   readout                                            -> nothing
+    //   zoom-box (real drag)                               -> commit zoom
     // -----------------------------------------------------------
-    let zoomBox = null;          // {x0,y0,x1,y1} in source pixels during drag
-    let panState = null;         // {lastX, lastY} during pan
-    let mode = null;             // "zoom-box" | "pan" | null
+    const HOLD_MS = 300;           // hold threshold before readout mode
+    const DRAG_PX = 4;             // movement threshold to promote to zoom-box
+    const CLICK_DEBOUNCE_MS = 220; // wait this long before applying a click-center
+    let zoomBox = null;            // {x0,y0,x1,y1} during a zoom-box drag
+    let panState = null;           // {lastX, lastY} during pan
+    let holdTimer = null;
+    let pendingClickTimer = null;  // debounced click-to-center; cancelled by dblclick
+    let downPos = null;            // {clientX, clientY, viewX, viewY}
+    let mode = null;               // "maybe-click" | "zoom-box" | "pan" | "readout" | null
 
     function eventToView(e) {
       const rect = imgCanvas.getBoundingClientRect();
@@ -440,7 +461,9 @@ function render({ model, el }) {
 
     imgCanvas.addEventListener("pointerdown", (e) => {
       hideMeta();
-      // Middle button OR Shift+left = pan; left alone = zoom-box; right = context.
+      // Cancel any pending center-on-click — a new gesture supersedes it.
+      if (pendingClickTimer) { clearTimeout(pendingClickTimer); pendingClickTimer = null; }
+      // Middle button OR Shift+left = pan; left alone = maybe-click; right = context.
       if (e.button === 1 || (e.button === 0 && e.shiftKey)) {
         mode = "pan";
         panState = { lastX: e.clientX, lastY: e.clientY };
@@ -448,15 +471,33 @@ function render({ model, el }) {
         imgCanvas.setPointerCapture(e.pointerId);
         e.preventDefault();
       } else if (e.button === 0) {
-        mode = "zoom-box";
         const p = eventToView(e);
-        zoomBox = { x0: p.x, y0: p.y, x1: p.x, y1: p.y };
+        downPos = { clientX: e.clientX, clientY: e.clientY, viewX: p.x, viewY: p.y };
+        mode = "maybe-click";
         imgCanvas.setPointerCapture(e.pointerId);
+        // After HOLD_MS without significant movement, switch to readout mode.
+        holdTimer = setTimeout(() => {
+          holdTimer = null;
+          if (mode === "maybe-click") {
+            mode = "readout";
+            updateReadout(downPos.clientX, downPos.clientY, downPos.viewX, downPos.viewY);
+          }
+        }, HOLD_MS);
         e.preventDefault();
       }
     });
 
     imgCanvas.addEventListener("pointermove", (e) => {
+      if (mode === "maybe-click") {
+        // Promote to zoom-box once the user has moved past the drag threshold.
+        const dx = Math.abs(e.clientX - downPos.clientX);
+        const dy = Math.abs(e.clientY - downPos.clientY);
+        if (dx > DRAG_PX || dy > DRAG_PX) {
+          if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+          mode = "zoom-box";
+          zoomBox = { x0: downPos.viewX, y0: downPos.viewY, x1: downPos.viewX, y1: downPos.viewY };
+        }
+      }
       if (mode === "zoom-box" && zoomBox) {
         const p = eventToView(e);
         zoomBox.x1 = p.x; zoomBox.y1 = p.y;
@@ -472,18 +513,35 @@ function render({ model, el }) {
         panState.lastX = e.clientX;
         panState.lastY = e.clientY;
         presentView();
+      } else if (mode === "readout") {
+        const p = eventToView(e);
+        updateReadout(e.clientX, e.clientY, p.x, p.y);
       }
     });
 
     const endPointer = (e) => {
-      if (mode === "zoom-box" && zoomBox) {
+      if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+      if (mode === "maybe-click") {
+        // Quick click with no drag and no hold -> debounce, then recenter view.
+        // The debounce gives the user CLICK_DEBOUNCE_MS to do a second click
+        // (which the browser will fire as `dblclick`) and supersede the centre.
+        const pos = { viewX: downPos.viewX, viewY: downPos.viewY };
+        pendingClickTimer = setTimeout(() => {
+          pendingClickTimer = null;
+          const v = view;
+          const w = v.x1 - v.x0, h = v.y1 - v.y0;
+          v.x0 = pos.viewX - w / 2; v.x1 = pos.viewX + w / 2;
+          v.y0 = pos.viewY - h / 2; v.y1 = pos.viewY + h / 2;
+          clampView(v);
+          presentView();
+        }, CLICK_DEBOUNCE_MS);
+      } else if (mode === "readout") {
+        hideReadout();
+      } else if (mode === "zoom-box" && zoomBox) {
         const v = view;
         const dx = Math.abs(zoomBox.x1 - zoomBox.x0);
         const dy = Math.abs(zoomBox.y1 - zoomBox.y0);
-        if (dx > 4 && dy > 4) {
-          // Force square: use the larger dimension as the side length, centered
-          // on the drag rectangle. Image is square so display canvas is square;
-          // a non-square view would stretch pixels non-uniformly.
+        if (dx > DRAG_PX && dy > DRAG_PX) {
           const side = Math.max(dx, dy);
           const cx = (zoomBox.x0 + zoomBox.x1) / 2;
           const cy = (zoomBox.y0 + zoomBox.y1) / 2;
@@ -496,15 +554,40 @@ function render({ model, el }) {
       }
       mode = null;
       panState = null;
+      downPos = null;
       imgBox.classList.remove(`${id}-panning`);
       try { imgCanvas.releasePointerCapture(e.pointerId); } catch (_) {}
     };
     imgCanvas.addEventListener("pointerup", endPointer);
     imgCanvas.addEventListener("pointercancel", endPointer);
 
-    // Double left-click: reset to full FOV.
+    function updateReadout(clientX, clientY, viewX, viewY) {
+      const f = frames[frameIdx];
+      const ix = Math.max(0, Math.min(f.W - 1, Math.floor(viewX)));
+      const iy = Math.max(0, Math.min(f.H - 1, Math.floor(viewY)));
+      // De-quantize stored uint16 back to a logical float.
+      const u16val = f.u16[iy * f.W + ix];
+      const value = f.vmin + (u16val / 65535) * (f.vmax - f.vmin);
+      const boxRect = imgBox.getBoundingClientRect();
+      const lx = clientX - boxRect.left;
+      const ly = clientY - boxRect.top;
+      // Offset so the readout isn't under the cursor. Flip sides if it would
+      // overflow the image box.
+      const offX = 14, offY = 14;
+      const RW = 130, RH = 28;  // approximate readout size for overflow checks
+      const flipX = lx + offX + RW > boxRect.width;
+      const flipY = ly + offY + RH > boxRect.height;
+      readoutEl.style.left = `${lx + (flipX ? -offX - RW : offX)}px`;
+      readoutEl.style.top  = `${ly + (flipY ? -offY - RH : offY)}px`;
+      readoutEl.textContent = `(${ix}, ${iy}) = ${value.toFixed(4)}`;
+      readoutEl.style.display = "block";
+    }
+    function hideReadout() { readoutEl.style.display = "none"; }
+
+    // Double left-click: reset to full FOV. Cancels any debounced single-click.
     imgCanvas.addEventListener("dblclick", (e) => {
       e.preventDefault();
+      if (pendingClickTimer) { clearTimeout(pendingClickTimer); pendingClickTimer = null; }
       const f = frames[frameIdx];
       view.x0 = 0; view.y0 = 0; view.x1 = f.W; view.y1 = f.H;
       hideMeta();
