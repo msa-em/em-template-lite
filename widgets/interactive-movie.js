@@ -1,21 +1,20 @@
-// interactive-image.js
-// AnyWidget that replicates notebooks/01.interactive_image.ipynb without a kernel.
+// interactive-movie.js
+// AnyWidget that replicates notebooks/03.interactive_movie.ipynb without a kernel.
 //
-// Loads a uint16-quantized image stack (produced by scripts/prep_widget_data.py)
-// plus a JSON sidecar, and renders it with colormap / vmin-vmax / frame controls.
+// Loads a uint8 movie stack (produced by scripts/prep_movie_widget_data.py) and
+// renders it with the same controls as the image widget (histogram, vmin/vmax,
+// colormap, scale bar, zoom/pan/readout) plus playback: play/pause, loop or
+// bounce, frame slider.
 //
-// Shadow-DOM safe:
-//   - all DOM queries are scoped to `el`
-//   - the only `document.*` calls are `document.createElement` (creates detached node)
-//   - no window/document event listeners; CSS injected as a <style> child of `el`
-//   - unique per-instance ID prefix for class names to avoid CSS collisions
+// Shadow-DOM safe (queries scoped to `el`, no document/window listeners,
+// CSS injected inside the widget root).
 //
-// Pure ESM module, no dependencies. Embed via MyST:
+// Embed via MyST:
 //
-//     :::{any:bundle} ./widgets/interactive-image.js
+//     :::{anywidget} ./widgets/interactive-movie.js
 //     {
-//       "data_url": "./widgets/data/interactive_image.bin",
-//       "meta_url": "./widgets/data/interactive_image.json"
+//       "data_url": "../widgets/data/interactive_movie.bin",
+//       "meta_url": "../widgets/data/interactive_movie.json"
 //     }
 //     :::
 
@@ -43,26 +42,35 @@ async function loadData(dataUrl, metaUrl) {
   const buf = await binRes.arrayBuffer();
   const meta = await metaRes.json();
   const [n, H, W] = meta.shape;
-  const all = new Uint16Array(buf);
-  // Slice per-frame views (no copy) and remember per-frame de-quantization range.
+  const all = new Uint8Array(buf);
+  // Slice per-frame views (no copy). Frame data is uint8 grayscale [0..255].
   const frames = [];
   for (let i = 0; i < n; i++) {
-    const u16 = all.subarray(i * H * W, (i + 1) * H * W);
-    const { vmin, vmax, label, mean, std } = meta.frames[i];
-    // Precompute a histogram in 100 bins from the stored uint16 (much faster
-    // than reconstructing float for every pixel).
-    const nBins = 100;
-    const hist = new Float32Array(nBins);
-    for (let j = 0; j < u16.length; j++) {
-      const b = Math.min(nBins - 1, Math.floor((u16[j] / 65535) * nBins));
-      hist[b]++;
-    }
-    let hmax = 0;
-    for (let b = 0; b < nBins; b++) if (hist[b] > hmax) hmax = hist[b];
-    for (let b = 0; b < nBins; b++) hist[b] /= hmax;
-    frames.push({ u16, H, W, vmin, vmax, mean, std, label, hist, nBins });
+    const u8 = all.subarray(i * H * W, (i + 1) * H * W);
+    frames.push({ u8, H, W });
   }
-  return { frames, meta };
+  // Histogram + stats from the first frame (the movie content evolves slowly,
+  // so first-frame stats give a sensible default display window).
+  const first = frames[0].u8;
+  const nBins = 100;
+  const hist = new Float32Array(nBins);
+  let sum = 0, sumSq = 0;
+  for (let j = 0; j < first.length; j++) {
+    const v = first[j];
+    sum += v;
+    sumSq += v * v;
+    hist[Math.min(nBins - 1, (v * nBins / 256) | 0)]++;
+  }
+  let hmax = 0;
+  for (let b = 0; b < nBins; b++) if (hist[b] > hmax) hmax = hist[b];
+  for (let b = 0; b < nBins; b++) hist[b] /= hmax;
+  const N = first.length;
+  const mean = sum / N;
+  const std = Math.sqrt(sumSq / N - mean * mean);
+  // Stats live as a single object shared across all frames (unlike the image
+  // widget where phase / amplitude have different value ranges).
+  const stats = { vmin: 0, vmax: 255, mean, std, hist, nBins };
+  return { frames, meta, stats };
 }
 
 // ============================================================
@@ -72,24 +80,16 @@ async function loadData(dataUrl, metaUrl) {
 // viewer then becomes a cheap `drawImage(offscreen, srcRect, dstRect)` call
 // rather than recomputing the colormap on every interaction.
 function renderToOffscreen(canvas, frame, displayVmin, displayVmax, cmapName) {
-  const { u16, H, W, vmin, vmax } = frame;
+  const { u8, H, W } = frame;
   const cmap = COLORMAPS[cmapName] || COLORMAPS.gray;
   canvas.width = W;
   canvas.height = H;
   const ctx = canvas.getContext("2d");
   const img = ctx.createImageData(W, H);
   const px = img.data;
-  // Pre-derive: stored uint16 v -> float = vmin + (v / 65535) * (vmax - vmin).
-  // Then map to [0,1] via (float - displayVmin) / (displayVmax - displayVmin).
-  // Combine: t = (vmin + (v / 65535) * (vmax - vmin) - displayVmin) / (displayVmax - displayVmin)
-  //        = a + b * v   where:
-  const span = vmax - vmin;
   const displaySpan = displayVmax - displayVmin || 1;
-  const a = (vmin - displayVmin) / displaySpan;
-  const b = (span / 65535) / displaySpan;
-
-  for (let i = 0, j = 0; i < u16.length; i++, j += 4) {
-    let t = a + b * u16[i];
+  for (let i = 0, j = 0; i < u8.length; i++, j += 4) {
+    let t = (u8[i] - displayVmin) / displaySpan;
     t = t < 0 ? 0 : (t > 1 ? 1 : t);
     const c = (t * 255) | 0;
     const o = c * 3;
@@ -101,14 +101,10 @@ function renderToOffscreen(canvas, frame, displayVmin, displayVmax, cmapName) {
   ctx.putImageData(img, 0, 0);
 }
 
-function renderHistogram(canvas, frame, displayVmin, displayVmax, cmapName) {
-  // Draw a histogram with each bar colored by where it falls in the current
-  // [displayVmin, displayVmax] window. Bars *outside* the window are clamped
-  // to the colormap's first / last colour (matplotlib's under/over behaviour),
-  // so they read as "below threshold" / "above threshold" rather than a
-  // disconnected gray band. The two vertical lines are draggable handles
-  // (drag logic lives on the canvas's pointer handlers, not in this function).
-  const { hist, nBins, vmin, vmax } = frame;
+function renderHistogram(canvas, stats, displayVmin, displayVmax, cmapName) {
+  // Histogram is computed once from the first frame; the colourmap-tinted
+  // window between displayVmin and displayVmax moves with the user's slider.
+  const { hist, nBins, vmin, vmax } = stats;
   const cmap = COLORMAPS[cmapName] || COLORMAPS.gray;
   const W = canvas.width, H = canvas.height;
   const ctx = canvas.getContext("2d");
@@ -161,9 +157,9 @@ function modelGet(model, key, fallback) {
 }
 
 function render({ model, el }) {
-  const dataUrl = modelGet(model, "data_url", "./widgets/data/interactive_image.bin");
-  const metaUrl = modelGet(model, "meta_url", "./widgets/data/interactive_image.json");
-  const id = "iim_" + Math.random().toString(36).slice(2, 8);
+  const dataUrl = modelGet(model, "data_url", "./widgets/data/interactive_movie.bin");
+  const metaUrl = modelGet(model, "meta_url", "./widgets/data/interactive_movie.json");
+  const id = "imv_" + Math.random().toString(36).slice(2, 8);
 
   el.innerHTML = `
     <style>
@@ -205,14 +201,24 @@ function render({ model, el }) {
       .${id}-colorbar-canvas { display: block; width: 12px; height: 100%; border-radius: 2px; }
       .${id}-cb-tick { position: absolute; left: 18px; font-size: 10px; color: #888; font-variant-numeric: tabular-nums; white-space: nowrap; line-height: 1; transform: translateY(-50%); }
       .${id}-cb-tick::before { content: ''; position: absolute; left: -5px; top: 50%; width: 4px; height: 1px; background: currentColor; }
+      /* Playback controls */
+      .${id}-pb-buttons { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+      .${id}-pb-btn { background: transparent; border: 1px solid #bbb; color: inherit; padding: 3px 8px; border-radius: 4px; font-size: 12px; cursor: pointer; font-family: inherit; line-height: 1.2; }
+      .${id}-pb-btn:hover { background: rgba(128,128,128,0.12); }
+      .${id}-pb-btn.${id}-active { background: rgba(60,140,80,0.18); border-color: rgb(60,140,80); color: rgb(40,110,60); }
+      .${id}-pb-play-btn { min-width: 56px; }
+      .${id}-pb-slider-row { display: flex; align-items: center; gap: 6px; }
+      .${id}-pb-slider { flex: 1; margin: 0; }
+      .${id}-pb-counter { font-size: 11px; color: #888; font-variant-numeric: tabular-nums; white-space: nowrap; min-width: 56px; text-align: right; }
     </style>
     <div class="${id}-wrap">
-      <div class="${id}-loading">Loading image data…</div>
+      <div class="${id}-loading">Loading movie data…</div>
     </div>`;
 
   const wrap = el.querySelector(`.${id}-wrap`);
 
-  loadData(dataUrl, metaUrl).then(({ frames, meta }) => {
+  loadData(dataUrl, metaUrl).then(({ frames, meta, stats }) => {
+    const nFrames = frames.length;
     wrap.innerHTML = `
       <div class="${id}-row">
         <div class="${id}-img-box">
@@ -247,8 +253,16 @@ function render({ model, el }) {
             </div>
           </div>
           <div class="${id}-ctrl">
-            <div class="${id}-section-label">Frame</div>
-            <select class="${id}-frame">${frames.map((f, i) => `<option value="${i}">${f.label}</option>`).join("")}</select>
+            <div class="${id}-section-label">Playback</div>
+            <div class="${id}-pb-buttons">
+              <button class="${id}-pb-btn ${id}-pb-play-btn" type="button" title="Play / pause">▶ Play</button>
+              <button class="${id}-pb-btn ${id}-pb-loop-btn ${id}-active" type="button" title="Loop: restart at end">↻ Loop</button>
+              <button class="${id}-pb-btn ${id}-pb-bounce-btn" type="button" title="Bounce: reverse at end">↔ Bounce</button>
+            </div>
+            <div class="${id}-pb-slider-row">
+              <input class="${id}-pb-slider" type="range" min="0" max="${nFrames - 1}" step="1" value="0" />
+              <span class="${id}-pb-counter">1 / ${nFrames}</span>
+            </div>
           </div>
           <div class="${id}-ctrl">
             <div class="${id}-section-label">Colormap</div>
@@ -266,7 +280,6 @@ function render({ model, el }) {
     const histCanvas = $(`.${id}-hist-canvas`);
     const vminVal = $(`.${id}-vmin-val`);
     const vmaxVal = $(`.${id}-vmax-val`);
-    const frameSel = $(`.${id}-frame`);
     const cmapSel = $(`.${id}-cmap`);
     const scalebarToggle = $(`.${id}-scalebar-toggle`);
     const scalebarEl = $(`.${id}-scalebar`);
@@ -276,19 +289,32 @@ function render({ model, el }) {
     const colorbarCanvas = $(`.${id}-colorbar-canvas`);
     const colorbarWrap = $(`.${id}-colorbar-wrap`);
     const readoutEl = $(`.${id}-readout`);
+    const playBtn = $(`.${id}-pb-play-btn`);
+    const loopBtn = $(`.${id}-pb-loop-btn`);
+    const bounceBtn = $(`.${id}-pb-bounce-btn`);
+    const frameSlider = $(`.${id}-pb-slider`);
+    const frameCounter = $(`.${id}-pb-counter`);
 
     let frameIdx = 0;
     let cmapName = "gray";
 
-    // Per-frame display ranges (different physical units across phase vs
-    // amplitude, so each frame remembers its own [vmin, vmax]).
-    const frameRanges = frames.map((f) => ({
-      vmin: f.mean - 1 * f.std,
-      vmax: f.mean + 2 * f.std,
-    }));
-    // Single SHARED viewport across frames — toggling frames keeps the same
-    // zoom/pan so phase vs amplitude can be compared at the same location.
+    // Single display range shared across all frames (the movie content
+    // evolves slowly so one range works for the whole sequence).
+    // Default = mean ± std of the first frame, just like the notebook.
+    const range = {
+      vmin: Math.max(0, stats.mean - 2 * stats.std),
+      vmax: Math.min(255, stats.mean + 1 * stats.std),
+    };
+    // Shared viewport.
     const view = { x0: 0, y0: 0, x1: frames[0].W, y1: frames[0].H };
+
+    // Playback state.
+    const FRAME_INTERVAL_MS = 1000 / (meta.playback_fps_default || 20);
+    let playing = false;
+    let playDir = 1;       // +1 forward, -1 reverse (used with bounce)
+    let loopMode = "loop"; // "loop" | "bounce" | "once"
+    let rafId = null;
+    let lastTick = 0;
 
     // Offscreen canvas with the full-resolution colormapped image. Recomputed
     // when frame / cmap / vmin / vmax change. Pan/zoom is then a cheap
@@ -298,10 +324,9 @@ function render({ model, el }) {
 
     function ensureOffscreen() {
       const f = frames[frameIdx];
-      const r = frameRanges[frameIdx];
-      const key = `${frameIdx}|${cmapName}|${r.vmin.toFixed(6)}|${r.vmax.toFixed(6)}`;
+      const key = `${frameIdx}|${cmapName}|${range.vmin.toFixed(2)}|${range.vmax.toFixed(2)}`;
       if (key === offscreenKey) return;
-      renderToOffscreen(offscreen, f, r.vmin, r.vmax, cmapName);
+      renderToOffscreen(offscreen, f, range.vmin, range.vmax, cmapName);
       offscreenKey = key;
     }
 
@@ -363,17 +388,15 @@ function render({ model, el }) {
     }
 
     function paint() {
-      const f = frames[frameIdx];
-      const r = frameRanges[frameIdx];
-      // Clamp value range
-      r.vmin = Math.max(f.vmin, Math.min(r.vmin, f.vmax));
-      r.vmax = Math.max(f.vmin, Math.min(r.vmax, f.vmax));
-      if (r.vmin >= r.vmax) r.vmin = r.vmax - (f.vmax - f.vmin) / 1000;
-      vminVal.textContent = r.vmin.toFixed(4);
-      vmaxVal.textContent = r.vmax.toFixed(4);
+      // Clamp the shared display range to [0, 255] (uint8 source)
+      range.vmin = Math.max(0, Math.min(range.vmin, 255));
+      range.vmax = Math.max(0, Math.min(range.vmax, 255));
+      if (range.vmin >= range.vmax) range.vmin = range.vmax - 1;
+      vminVal.textContent = range.vmin.toFixed(0);
+      vmaxVal.textContent = range.vmax.toFixed(0);
       ensureOffscreen();
       presentView();
-      renderHistogram(histCanvas, f, r.vmin, r.vmax, cmapName);
+      renderHistogram(histCanvas, stats, range.vmin, range.vmax, cmapName);
       renderColorbar();
     }
 
@@ -382,7 +405,7 @@ function render({ model, el }) {
     // -----------------------------------------------------------
     function renderColorbar() {
       const cmap = COLORMAPS[cmapName] || COLORMAPS.gray;
-      const r = frameRanges[frameIdx];
+      const r = range;
       const W = colorbarCanvas.width;
       const H = colorbarCanvas.height;
       const ctx = colorbarCanvas.getContext("2d");
@@ -518,9 +541,7 @@ function render({ model, el }) {
       const f = frames[frameIdx];
       const ix = Math.max(0, Math.min(f.W - 1, Math.floor(viewX)));
       const iy = Math.max(0, Math.min(f.H - 1, Math.floor(viewY)));
-      // De-quantize stored uint16 back to a logical float.
-      const u16val = f.u16[iy * f.W + ix];
-      const value = f.vmin + (u16val / 65535) * (f.vmax - f.vmin);
+      const value = f.u8[iy * f.W + ix];  // uint8 pixel value
       const boxRect = imgBox.getBoundingClientRect();
       const lx = clientX - boxRect.left;
       const ly = clientY - boxRect.top;
@@ -532,7 +553,7 @@ function render({ model, el }) {
       const flipY = ly + offY + RH > boxRect.height;
       readoutEl.style.left = `${lx + (flipX ? -offX - RW : offX)}px`;
       readoutEl.style.top  = `${ly + (flipY ? -offY - RH : offY)}px`;
-      readoutEl.textContent = `(${ix}, ${iy}) = ${value.toFixed(4)}`;
+      readoutEl.textContent = `(${ix}, ${iy}) = ${value}`;
       readoutEl.style.display = "block";
     }
     function hideReadout() { readoutEl.style.display = "none"; }
@@ -573,19 +594,21 @@ function render({ model, el }) {
       const f = frames[frameIdx];
       const v = view;
       const boxRect = imgBox.getBoundingClientRect();
-      // Position popup near the click, clamped inside the image box
       const x = Math.min(e.clientX - boxRect.left, boxRect.width - 290);
       const y = Math.min(e.clientY - boxRect.top, boxRect.height - 200);
       metaEl.style.left = `${Math.max(8, x)}px`;
       metaEl.style.top = `${Math.max(8, y)}px`;
+      const srcFps = meta.source_fps || 30;
+      const stride = meta.stride || 1;
+      const timeSec = (frameIdx * stride) / srcFps;
       metaEl.innerHTML = `
         <span class="${id}-meta-close" title="close">×</span>
-        <div><strong>Frame</strong>: ${f.label}</div>
+        <div><strong>Frame</strong>: ${frameIdx + 1} / ${nFrames}  (t = ${timeSec.toFixed(2)} s)</div>
         <div><strong>Source shape</strong>: ${f.W} × ${f.H} px</div>
+        <div><strong>Source fps</strong>: ${srcFps} (every ${stride}th frame shown)</div>
         <div><strong>Pixel size</strong>: ${meta.pixel_size_nm.toFixed(4)} nm/px</div>
-        <div><strong>Data range</strong>: ${f.vmin.toFixed(4)} … ${f.vmax.toFixed(4)}</div>
-        <div><strong>Mean ± std</strong>: ${f.mean.toFixed(4)} ± ${f.std.toFixed(4)}</div>
-        <div><strong>Display range</strong>: ${frameRanges[frameIdx].vmin.toFixed(4)} … ${frameRanges[frameIdx].vmax.toFixed(4)}</div>
+        <div><strong>First-frame mean ± std</strong>: ${stats.mean.toFixed(1)} ± ${stats.std.toFixed(1)}</div>
+        <div><strong>Display range</strong>: ${range.vmin.toFixed(0)} … ${range.vmax.toFixed(0)}</div>
         <div><strong>View</strong>: (${v.x0.toFixed(0)}, ${v.y0.toFixed(0)}) → (${v.x1.toFixed(0)}, ${v.y1.toFixed(0)})</div>
       `;
       metaEl.style.display = "block";
@@ -610,18 +633,17 @@ function render({ model, el }) {
       return ((e.clientX - rect.left) / rect.width) * histCanvas.width;
     }
     function valueFromX(x) {
-      const f = frames[frameIdx];
+      // Movie histogram axis is the uint8 value space [0, 255].
       const t = Math.max(0, Math.min(1, x / histCanvas.width));
-      return f.vmin + t * (f.vmax - f.vmin);
+      return stats.vmin + t * (stats.vmax - stats.vmin);
     }
     function xFromValue(val) {
-      const f = frames[frameIdx];
-      return ((val - f.vmin) / (f.vmax - f.vmin)) * histCanvas.width;
+      return ((val - stats.vmin) / (stats.vmax - stats.vmin)) * histCanvas.width;
     }
     histCanvas.addEventListener("pointerdown", (e) => {
       e.preventDefault();
       const x = canvasXFromEvent(e);
-      const r = frameRanges[frameIdx];
+      const r = range;
       const dMin = Math.abs(x - xFromValue(r.vmin));
       const dMax = Math.abs(x - xFromValue(r.vmax));
       dragging = dMin <= dMax ? "vmin" : "vmax";
@@ -640,33 +662,87 @@ function render({ model, el }) {
     histCanvas.addEventListener("pointerup", endHistDrag);
     histCanvas.addEventListener("pointercancel", endHistDrag);
     function applyHistDrag(x) {
-      const f = frames[frameIdx];
-      const r = frameRanges[frameIdx];
-      const eps = (f.vmax - f.vmin) / 1000;
+      const r = range;
+      const eps = 1;  // 1-uint8-level step
       const v = valueFromX(x);
       if (dragging === "vmin") r.vmin = Math.min(v, r.vmax - eps);
       else if (dragging === "vmax") r.vmax = Math.max(v, r.vmin + eps);
       paint();
     }
 
-    paint();
+    // -----------------------------------------------------------
+    // Playback
+    // -----------------------------------------------------------
+    function syncFrameUI() {
+      frameSlider.value = String(frameIdx);
+      frameCounter.textContent = `${frameIdx + 1} / ${nFrames}`;
+    }
 
-    frameSel.addEventListener("change", () => {
-      frameIdx = parseInt(frameSel.value, 10);
-      hideMeta();
-      // View is shared across frames — but if a future dataset has frames of
-      // different sizes the clamp keeps the view valid.
-      clampView(view);
+    function setPlaying(v) {
+      playing = v;
+      playBtn.textContent = playing ? "⏸ Pause" : "▶ Play";
+      if (playing) {
+        lastTick = performance.now();
+        rafId = requestAnimationFrame(tick);
+      } else if (rafId !== null) {
+        cancelAnimationFrame(rafId);
+        rafId = null;
+      }
+    }
+
+    function tick(now) {
+      if (!playing) return;
+      if (now - lastTick >= FRAME_INTERVAL_MS) {
+        advanceFrame();
+        lastTick = now;
+      }
+      rafId = requestAnimationFrame(tick);
+    }
+
+    function advanceFrame() {
+      let next = frameIdx + playDir;
+      if (next >= nFrames) {
+        if (loopMode === "bounce") { playDir = -1; next = Math.max(0, nFrames - 2); }
+        else if (loopMode === "loop") { next = 0; }
+        else { setPlaying(false); return; }
+      } else if (next < 0) {
+        if (loopMode === "bounce") { playDir = 1; next = Math.min(nFrames - 1, 1); }
+        else if (loopMode === "loop") { next = nFrames - 1; }
+        else { setPlaying(false); return; }
+      }
+      frameIdx = next;
+      syncFrameUI();
+      paint();
+    }
+
+    function setLoopMode(m) {
+      loopMode = m;
+      loopBtn.classList.toggle(`${id}-active`, m === "loop");
+      bounceBtn.classList.toggle(`${id}-active`, m === "bounce");
+    }
+
+    playBtn.addEventListener("click", () => setPlaying(!playing));
+    loopBtn.addEventListener("click", () => setLoopMode(loopMode === "loop" ? "once" : "loop"));
+    bounceBtn.addEventListener("click", () => setLoopMode(loopMode === "bounce" ? "once" : "bounce"));
+    frameSlider.addEventListener("input", () => {
+      frameIdx = parseInt(frameSlider.value, 10);
+      // Reset bounce direction on scrub so user-driven motion is monotonic.
+      playDir = 1;
+      syncFrameUI();
       paint();
     });
+
     cmapSel.addEventListener("change", () => { cmapName = cmapSel.value; paint(); });
     scalebarToggle.addEventListener("change", () => {
       const v = scalebarToggle.checked ? "block" : "none";
       scalebarEl.style.display = v;
       scalebarLabel.style.display = v;
     });
+
+    syncFrameUI();
+    paint();
   }).catch(err => {
-    wrap.innerHTML = `<div style="padding: 16px; color: #c33; font-family: monospace; font-size: 12px;">Failed to load image data:<br>${err.message}</div>`;
+    wrap.innerHTML = `<div style="padding: 16px; color: #c33; font-family: monospace; font-size: 12px;">Failed to load movie data:<br>${err.message}</div>`;
   });
 
   // No window/document listeners → no cleanup needed.

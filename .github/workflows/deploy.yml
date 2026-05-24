@@ -52,6 +52,9 @@ jobs:
       - name: Quantize image data for anywidget viewer
         run: python scripts/prep_widget_data.py
 
+      - name: Decode movie for anywidget viewer
+        run: python scripts/prep_movie_widget_data.py
+
       - name: Build JupyterLite
         run: |
           jupyter lite build \

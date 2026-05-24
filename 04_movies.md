@@ -46,3 +46,19 @@ Multislice HRTEM simulation of a hollow gold nanosphere. Sample morphology estim
 
 :::::
 
+## Movie player without compute
+
+The interactive movie above runs a Python kernel; the same playback controls can also be built as a kernel-less anywidget. [](#fig_movie_anywidget) shows the same sequence with play / pause, loop, bounce, and a scrubbable frame slider, plus the same display-range, colormap, and zoom controls as the image widget on the previous page.
+
+::::{figure}
+:name: fig_movie_anywidget
+
+:::{anywidget} ./widgets/interactive-movie.js
+{
+  "data_url": "../widgets/data/interactive_movie.bin",
+  "meta_url": "../widgets/data/interactive_movie.json"
+}
+:::
+
+Same TEM sequence as [](#fig_movie_widget_ipympl_ipywidgets), replayed in the browser without a Python kernel.
+::::
