@@ -83,14 +83,13 @@ article .myst-bibliography a {
 /* External-link icon next to off-site links — keep it red too. */
 article .link .link-icon { color: rgb(191, 0, 63); }
 
-/* ---------- Hide journal/authors/date strip on non-landing pages ----------
-   The landing page (index.md) is uniquely identified by its `+++ part: abstract`
-   block, which book-theme renders as `.myst-abstract`. Pages without an
-   abstract get their frontmatter header strip, authors block, and date row
-   hidden. The page <h1> title still renders because it lives outside these
-   targeted elements. */
-article:not(:has(.myst-abstract)) .myst-fm-block-header,
-article:not(:has(.myst-abstract)) .myst-fm-block-date-doi,
-article:not(:has(.myst-abstract)) header.myst-fm-authors-affiliations {
+/* ---------- Hide journal/authors/date strip site-wide ----------
+   The landing now matches the other pages — the "Elemental Microscopy"
+   banner, license / download / edit / github icons, and the date row
+   are all suppressed. Only the <h1> page title still renders (it lives
+   outside the targeted elements). */
+.myst-fm-block-header,
+.myst-fm-block-date-doi,
+header.myst-fm-authors-affiliations {
   display: none !important;
 }
