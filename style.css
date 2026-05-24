@@ -50,8 +50,38 @@ html.dark .myst-navbar-end a:has(img[data-canonical-url*="msa-logo-dark"]) { dis
   .myst-navbar-end { display: none; }
 }
 
-/* ---------- Nav links: a hair more weight ---------- */
+/* ---------- Nav links: a hair more weight, and centered in the bar ---------- */
 .myst-top-nav-item { font-weight: 500; }
+/* The middle column of the top nav holds the nav items in book-theme.
+   It's a flex-grow container; centering its content visually centers
+   the (Overview / Latest / Submit / Team) row between the home-link
+   and the MSA logo. */
+.myst-top-nav-bar > div:nth-child(2) > div:first-child {
+  text-align: center !important;
+}
+
+/* ---------- Link colors: deep red rather than book-theme's blue ----------
+   Same colour (191, 0, 63) in light and dark mode per request.
+   Scoped to <article> so we don't override the home-link (which is
+   already its own red) or the search/theme-toggle controls in the navbar. */
+article a:not(.myst-home-link),
+article .link,
+article .hover-link {
+  color: rgb(191, 0, 63) !important;
+}
+article a:not(.myst-home-link):hover,
+article .link:hover,
+article .hover-link:hover {
+  text-decoration-color: rgb(191, 0, 63);
+}
+/* Citation group children (e.g., `{cite:t}` rendered citations) sit
+   inside spans that override the parent colour — target the inner <a>. */
+article .cite-group a,
+article .myst-bibliography a {
+  color: rgb(191, 0, 63) !important;
+}
+/* External-link icon next to off-site links — keep it red too. */
+article .link .link-icon { color: rgb(191, 0, 63); }
 
 /* ---------- Hide journal/authors/date strip on non-landing pages ----------
    The landing page (index.md) is uniquely identified by its `+++ part: abstract`
