@@ -115,6 +115,10 @@ site:
     logo_url: /
     # Show only top-level entries by default in the right-hand outline.
     outline_maxdepth: 2
+    # Hide the global search bar in the top nav.
+    hide_search: true
+    # Hide the prev/next page links book-theme inserts in the page footer.
+    hide_footer_links: true
   nav:
     - title: Overview
       url: https://www.elementalmicroscopy.org/overview
@@ -129,10 +133,11 @@ site:
   #   navbar_end:  the right side of the top nav (MSA logo)
   #   footer:      the bottom-of-page colophon (replaces "Made with MyST")
   parts:
-    # Markdown image-link. The external-link icon book-theme adds is hidden
-    # by CSS targeting `.myst-navbar-end a svg.link-icon`.
+    # Two MSA image-links: the light version for light mode, dark version for
+    # dark mode. CSS in style.css toggles which is visible. The external-link
+    # icon book-theme attaches to off-site links is also hidden via CSS.
     navbar_end: |
-      [![MSA](/assets/msa-logo.svg)](https://www.microscopy.org/)
+      [![MSA](/assets/msa-logo-light.svg)](https://www.microscopy.org/) [![MSA](/assets/msa-logo-dark.svg)](https://www.microscopy.org/)
     footer: |
       Published by the [Microscopy Society of America](https://www.microscopy.org/). *Elemental Microscopy* is an open-access journal of MSA.
     primary_sidebar_footer: |

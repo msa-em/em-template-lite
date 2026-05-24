@@ -3,7 +3,7 @@
    Loaded via `site.options.style` in myst.yml.
 
    Layout target for the top nav:
-       [ ☰ toggle  Elemental Microscopy ]   [ Overview · Latest · Submit · Team ]   [ MSA logo ]
+       [ Elemental Microscopy ]   [ Overview · Latest · Submit · Team ]   [ MSA logo ]
    ============================================================ */
 
 /* ---------- Site title (upper-left, red) ---------- */
@@ -23,28 +23,25 @@ html.dark .myst-home-link span {
   color: rgb(220, 80, 80) !important;
 }
 
-/* ---------- Sidebar toggle visible on desktop ----------
-   book-theme hides the hamburger above the `xl` breakpoint (1280 px).
-   We bring it back so the reader can collapse the side nav even on
-   wide screens. The existing click handler in book-theme still works. */
-@media (min-width: 1280px) {
-  .myst-top-nav-bar > div:first-child > div:first-child {
-    display: block !important;
-  }
-}
-
 /* ---------- MSA logo in the navbar_end part ----------
-   Injected via the book-theme `navbar_end` part defined in myst.yml.
-   The part wraps content in `<div class="myst-navbar-end">…</div>`. */
-.myst-navbar-end p { margin: 0; }
+   The part contains TWO image-links — one for light mode, one for dark.
+   We toggle visibility based on the theme, hiding the unused link entirely
+   (otherwise its anchor would take up clickable space). The book-theme
+   external-link arrow on both is suppressed. */
+.myst-navbar-end p { margin: 0; display: inline-flex; align-items: center; gap: 0; }
 .myst-navbar-end a img {
   height: 32px;
   width: auto;
   max-width: 160px;
   display: block;
 }
-/* Hide the external-link arrow book-theme adds to off-site links. */
 .myst-navbar-end a svg.link-icon { display: none; }
+
+/* Default = light mode: show light logo, hide dark */
+.myst-navbar-end a:has(img[data-canonical-url*="msa-logo-dark"]) { display: none; }
+/* Dark mode: invert */
+html.dark .myst-navbar-end a:has(img[data-canonical-url*="msa-logo-light"]) { display: none; }
+html.dark .myst-navbar-end a:has(img[data-canonical-url*="msa-logo-dark"]) { display: inline-flex; }
 
 @media (max-width: 640px) {
   .myst-navbar-end a img { height: 24px; max-width: 110px; }
@@ -53,5 +50,17 @@ html.dark .myst-home-link span {
   .myst-navbar-end { display: none; }
 }
 
-/* ---------- Nav links: a hair more breathing room ---------- */
+/* ---------- Nav links: a hair more weight ---------- */
 .myst-top-nav-item { font-weight: 500; }
+
+/* ---------- Hide journal/authors/date strip on non-landing pages ----------
+   The landing page (index.md) is uniquely identified by its `+++ part: abstract`
+   block, which book-theme renders as `.myst-abstract`. Pages without an
+   abstract get their frontmatter header strip, authors block, and date row
+   hidden. The page <h1> title still renders because it lives outside these
+   targeted elements. */
+article:not(:has(.myst-abstract)) .myst-fm-block-header,
+article:not(:has(.myst-abstract)) .myst-fm-block-date-doi,
+article:not(:has(.myst-abstract)) header.myst-fm-authors-affiliations {
+  display: none !important;
+}
